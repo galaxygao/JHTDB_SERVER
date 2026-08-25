@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: jhtdb-regimes
+Version: 0.1.0
+Summary: Testing-token-safe JHTDB acceleration regime pipeline
+Requires-Python: >=3.10
+Requires-Dist: givernylocal<4,>=3.6.2
+Requires-Dist: numpy<3,>=1.23
+Requires-Dist: pandas<3,>=1.5
+Requires-Dist: PyYAML<7,>=6
+Requires-Dist: scipy<2,>=1.9
