@@ -1,2 +1,0 @@
-[console_scripts]
-jhtdb-regimes = jhtdb_regimes.cli:main

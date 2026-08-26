@@ -2,7 +2,16 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
-data/cache/
-data/raw/
-data/derived/
+.coverage
+
+# Project data must live outside this Git/cloud-sync workspace.
+data/
+raw/
+derived/
+scratch/
+*.zarr/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.partial
 

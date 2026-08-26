@@ -1,39 +1,79 @@
+from __future__ import annotations
+
 import unittest
-from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from jhtdb_regimes.config import load_config
-from jhtdb_regimes.dashboard import REGIME_LABELS, direct_filter, heatmap, plane
-from jhtdb_regimes.physics import gaussian_valid
+from jhtdb_pipeline.dashboard import (
+    extract_scalar_slice,
+    extract_gradient_slice,
+    extract_slice,
+    open_derived_readonly,
+    open_filtered_readonly,
+    open_gradient_readonly,
+    open_snapshot_readonly,
+)
 
 
-CONFIG = Path(__file__).parents[1] / "configs" / "task0.yaml"
+class DashboardTests(unittest.TestCase):
+    def test_axis_mapping(self):
+        array = np.arange(3 * 4 * 5 * 6).reshape(3, 4, 5, 6)
+        np.testing.assert_array_equal(extract_slice(array, 1, "x", 2), array[1, :, :, 2])
+        np.testing.assert_array_equal(extract_slice(array, 1, "y", 2), array[1, :, 2, :])
+        np.testing.assert_array_equal(extract_slice(array, 1, "z", 2), array[1, 2, :, :])
 
+        scalar = array[0]
+        np.testing.assert_array_equal(extract_scalar_slice(scalar, "x", 2), scalar[:, :, 2])
+        np.testing.assert_array_equal(extract_scalar_slice(scalar, "y", 2), scalar[:, 2, :])
+        np.testing.assert_array_equal(extract_scalar_slice(scalar, "z", 2), scalar[2, :, :])
 
-class DashboardHelperTests(unittest.TestCase):
-    def test_plane_axis_mapping(self):
-        field = np.arange(8**3).reshape(8, 8, 8)
-        np.testing.assert_array_equal(plane(field, "z", 2)[0], field[2, :, :])
-        np.testing.assert_array_equal(plane(field, "y", 3)[0], field[:, 3, :])
-        np.testing.assert_array_equal(plane(field, "x", 4)[0], field[:, :, 4])
+        gradient = np.arange(3 * 3 * 4 * 5 * 6).reshape(3, 3, 4, 5, 6)
+        np.testing.assert_array_equal(
+            extract_gradient_slice(gradient, 1, 2, "x", 3), gradient[1, 2, :, :, 3]
+        )
+        np.testing.assert_array_equal(
+            extract_gradient_slice(gradient, 1, 2, "y", 3), gradient[1, 2, :, 3, :]
+        )
+        np.testing.assert_array_equal(
+            extract_gradient_slice(gradient, 1, 2, "z", 3), gradient[1, 2, 3, :, :]
+        )
 
-    def test_dashboard_direct_filter_is_independent_match(self):
-        cfg = load_config(CONFIG)
-        field = np.random.default_rng(52).normal(size=(16, 16, 16))
-        production = gaussian_valid(field, cfg.sigma_grid, cfg.support_radius)
-        independent = direct_filter(field, cfg)
-        np.testing.assert_allclose(production, independent, rtol=2e-13, atol=2e-13)
+    @patch("jhtdb_pipeline.dashboard.zarr.open_group")
+    def test_snapshot_is_opened_read_only(self, mock_open_group):
+        velocity = MagicMock()
+        mock_open_group.return_value.__getitem__.return_value.__getitem__.return_value = velocity
+        result = open_snapshot_readonly("velocity.zarr", 7)
+        mock_open_group.assert_called_once_with("velocity.zarr", mode="r")
+        mock_open_group.return_value.__getitem__.assert_called_once_with("t000007")
+        self.assertIs(result, velocity)
 
-    def test_regime_legend_has_five_equal_categories(self):
-        field = np.arange(5, dtype=np.uint8)[:, None, None] * np.ones((5, 2, 2), dtype=np.uint8)
-        figure = heatmap(field, "regime", "z", 0, regime=True)
-        trace = figure.data[0]
-        self.assertEqual(tuple(trace.colorbar.tickvals), (0, 1, 2, 3, 4))
-        self.assertEqual(tuple(trace.colorbar.ticktext), REGIME_LABELS)
-        self.assertEqual(trace.zmin, -0.5)
-        self.assertEqual(trace.zmax, 4.5)
-        self.assertEqual(len(trace.colorscale), 10)
+    @patch("jhtdb_pipeline.dashboard.zarr.open_group")
+    def test_derived_is_opened_read_only(self, mock_open_group):
+        group = MagicMock()
+        mock_open_group.return_value.__getitem__.return_value = group
+        result = open_derived_readonly("physics.zarr", 12)
+        mock_open_group.assert_called_once_with("physics.zarr", mode="r")
+        mock_open_group.return_value.__getitem__.assert_called_once_with("t000012")
+        self.assertIs(result, group)
+
+    @patch("jhtdb_pipeline.dashboard.zarr.open_group")
+    def test_gradient_is_opened_read_only(self, mock_open_group):
+        group = MagicMock()
+        mock_open_group.return_value.__getitem__.return_value = group
+        result = open_gradient_readonly("gradients.zarr", 3)
+        mock_open_group.assert_called_once_with("gradients.zarr", mode="r")
+        mock_open_group.return_value.__getitem__.assert_called_once_with("t000003")
+        self.assertIs(result, group)
+
+    @patch("jhtdb_pipeline.dashboard.zarr.open_group")
+    def test_filtered_is_opened_read_only(self, mock_open_group):
+        group = MagicMock()
+        mock_open_group.return_value.__getitem__.return_value = group
+        result = open_filtered_readonly("filtered.zarr", 4)
+        mock_open_group.assert_called_once_with("filtered.zarr", mode="r")
+        mock_open_group.return_value.__getitem__.assert_called_once_with("t000004")
+        self.assertIs(result, group)
 
 
 if __name__ == "__main__":

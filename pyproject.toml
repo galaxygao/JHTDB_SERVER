@@ -3,22 +3,26 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jhtdb-regimes"
-version = "0.1.0"
-description = "Testing-token-safe JHTDB acceleration regime pipeline"
+name = "jhtdb-pipeline"
+version = "0.2.0"
+description = "Serial, resumable JHTDB full-periodic velocity pipeline"
 requires-python = ">=3.10"
 dependencies = [
+  "filelock>=3.13,<4",
   "givernylocal>=3.6.2,<4",
+  "keyring>=25,<26",
+  "numcodecs>=0.12,<0.16",
   "numpy>=1.23,<3",
-  "pandas>=1.5,<3",
+  "plotly>=5,<7",
   "PyYAML>=6,<7",
+  "rich>=13,<15",
   "scipy>=1.9,<2",
   "streamlit>=1.40,<2",
-  "plotly>=5,<7",
+  "zarr>=2.18,<3",
 ]
 
 [project.scripts]
-jhtdb-regimes = "jhtdb_regimes.cli:main"
+jhtdb-pipeline = "jhtdb_pipeline.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
