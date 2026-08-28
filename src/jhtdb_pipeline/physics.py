@@ -96,6 +96,7 @@ def transform_axis(
     axis: int,
     slab: int,
     *,
+    workers: int = 1,
     derivative_domain_length: float | None = None,
     gaussian_sigma_grid: float | None = None,
 ) -> None:
@@ -117,10 +118,10 @@ def transform_axis(
     shaped_multiplier = multiplier.reshape(multiplier_shape)
     for key in axis_batches(tuple(source.shape), axis, slab):
         block = np.asarray(source[key], dtype=np.float32)
-        spectrum = fft.rfft(block, axis=axis, workers=1)
+        spectrum = fft.rfft(block, axis=axis, workers=workers)
         spectrum *= shaped_multiplier
         destination[key] = fft.irfft(
-            spectrum, n=n, axis=axis, workers=1
+            spectrum, n=n, axis=axis, workers=workers
         ).astype(np.float32)
 
 
@@ -130,12 +131,14 @@ def derivative_field(
     derivative_component: int,
     domain_length: float,
     slab: int,
+    workers: int = 1,
 ) -> None:
     transform_axis(
         source,
         destination,
         ARRAY_AXIS_FOR_DERIVATIVE[derivative_component],
         slab,
+        workers=workers,
         derivative_domain_length=domain_length,
     )
 
@@ -147,15 +150,16 @@ def filter_field(
     temp_b: Any,
     sigma_grid: float,
     slab: int,
+    workers: int = 1,
 ) -> None:
     transform_axis(
-        source, temp_a, 2, slab, gaussian_sigma_grid=sigma_grid
+        source, temp_a, 2, slab, workers=workers, gaussian_sigma_grid=sigma_grid
     )
     transform_axis(
-        temp_a, temp_b, 1, slab, gaussian_sigma_grid=sigma_grid
+        temp_a, temp_b, 1, slab, workers=workers, gaussian_sigma_grid=sigma_grid
     )
     transform_axis(
-        temp_b, destination, 0, slab, gaussian_sigma_grid=sigma_grid
+        temp_b, destination, 0, slab, workers=workers, gaussian_sigma_grid=sigma_grid
     )
 
 

@@ -204,6 +204,8 @@ jhtdb:
   tile_shape: [128, 128, 128]
 
 storage:
+  compression_level: 3
+  compression_threads: 8
   persistent_capacity_gb_observed: 100
   persistent_safety_reserve_gib: 15
   scratch_safety_reserve_gib: 16
@@ -212,10 +214,13 @@ physics:
   sigma_grid: 1.0
   crop_start: [256, 256, 256]
   crop_shape: [512, 512, 512]
-  fft_slab_width: 4
+  fft_workers: 16
+  fft_slab_width: 32
 ```
 
 配置解析器拒绝未知字段，避免拼写错误被静默忽略。`persistent_capacity_gb_observed` 是 Quotas 页面观测值，不代表程序能通过文件系统调用读取账户硬配额。
+
+JHTDB 请求仍严格串行；`fft_workers` 只并行容器内的 FFT。`fft_slab_width: 32` 使单个 FFT 输入块约为 128 MiB，配合 16 个 FFT workers 和 8 个 Blosc 压缩线程使用多核资源，同时继续把约 28 GiB 中间场存入 scratch memmap。
 
 ## 6. 首次建立环境
 

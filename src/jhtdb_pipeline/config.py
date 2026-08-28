@@ -58,6 +58,7 @@ class PipelineConfig:
     backoff_seconds: float
     request_cooldown_seconds: float
     compression_level: int
+    compression_threads: int
     persistent_capacity_gb_observed: float
     persistent_safety_reserve_gib: float
     scratch_safety_reserve_gib: float
@@ -69,6 +70,7 @@ class PipelineConfig:
     sigma_grid: float
     epsilon_abs: float
     epsilon_rel: float
+    fft_workers: int
     fft_slab_width: int
     cleanup_scratch_on_success: bool
 
@@ -161,6 +163,8 @@ class PipelineConfig:
             raise ValueError("JHTDB retry settings are invalid")
         if not 0 <= self.compression_level <= 9:
             raise ValueError("compression_level must be between 0 and 9")
+        if self.compression_threads < 1:
+            raise ValueError("compression_threads must be positive")
         if self.persistent_capacity_gb_observed <= 0:
             raise ValueError("persistent_capacity_gb_observed must be positive")
         if self.persistent_safety_reserve_gib < 0 or self.scratch_safety_reserve_gib < 0:
@@ -176,8 +180,8 @@ class PipelineConfig:
             raise ValueError("divergence tolerances must be positive")
         if self.sigma_grid <= 0 or self.epsilon_abs < 0 or self.epsilon_rel < 0:
             raise ValueError("physics parameters are invalid")
-        if self.fft_slab_width < 1:
-            raise ValueError("fft_slab_width must be positive")
+        if self.fft_workers < 1 or self.fft_slab_width < 1:
+            raise ValueError("fft_workers and fft_slab_width must be positive")
 
 
 def load_config(path: str | Path) -> PipelineConfig:
@@ -201,9 +205,9 @@ def load_config(path: str | Path) -> PipelineConfig:
     _reject_unknown(platform, {"state_root", "run_root", "result_root", "scratch_retention_hours"}, "platform")
     _reject_unknown(auth, {"token_file"}, "auth")
     _reject_unknown(jhtdb, {"tile_shape", "retries", "backoff_seconds", "request_cooldown_seconds"}, "jhtdb")
-    _reject_unknown(storage, {"compression_level", "persistent_capacity_gb_observed", "persistent_safety_reserve_gib", "scratch_safety_reserve_gib"}, "storage")
+    _reject_unknown(storage, {"compression_level", "compression_threads", "persistent_capacity_gb_observed", "persistent_safety_reserve_gib", "scratch_safety_reserve_gib"}, "storage")
     _reject_unknown(validation, {"divergence_relative_rms_max", "divergence_relative_max_max"}, "validation")
-    _reject_unknown(physics, {"sigma_grid", "crop_start", "crop_shape", "epsilon_abs", "epsilon_rel", "fft_slab_width", "cleanup_scratch_on_success"}, "physics")
+    _reject_unknown(physics, {"sigma_grid", "crop_start", "crop_shape", "epsilon_abs", "epsilon_rel", "fft_workers", "fft_slab_width", "cleanup_scratch_on_success"}, "physics")
 
     token_value = auth.get("token_file")
     cfg = PipelineConfig(
@@ -221,6 +225,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         backoff_seconds=float(jhtdb.get("backoff_seconds", 2.0)),
         request_cooldown_seconds=float(jhtdb.get("request_cooldown_seconds", 0.25)),
         compression_level=int(storage.get("compression_level", 3)),
+        compression_threads=int(storage.get("compression_threads", 8)),
         persistent_capacity_gb_observed=float(storage.get("persistent_capacity_gb_observed", 100.0)),
         persistent_safety_reserve_gib=float(storage.get("persistent_safety_reserve_gib", 15.0)),
         scratch_safety_reserve_gib=float(storage.get("scratch_safety_reserve_gib", 16.0)),
@@ -232,7 +237,8 @@ def load_config(path: str | Path) -> PipelineConfig:
         sigma_grid=float(physics.get("sigma_grid", 1.0)),
         epsilon_abs=float(physics.get("epsilon_abs", 0.0)),
         epsilon_rel=float(physics.get("epsilon_rel", 0.001)),
-        fft_slab_width=int(physics.get("fft_slab_width", 4)),
+        fft_workers=int(physics.get("fft_workers", 16)),
+        fft_slab_width=int(physics.get("fft_slab_width", 32)),
         cleanup_scratch_on_success=bool(physics.get("cleanup_scratch_on_success", True)),
     )
     cfg.validate()

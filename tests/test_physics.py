@@ -67,7 +67,7 @@ class PhysicsTests(unittest.TestCase):
             temp_a = memmap(root / "a.f32", field.shape)
             temp_b = memmap(root / "b.f32", field.shape)
             try:
-                filter_field(field, output, temp_a, temp_b, 1.0, slab=2)
+                filter_field(field, output, temp_a, temp_b, 1.0, slab=2, workers=2)
                 np.testing.assert_allclose(
                     output, spectral_gaussian(field, 1.0), rtol=2e-5, atol=2e-6
                 )

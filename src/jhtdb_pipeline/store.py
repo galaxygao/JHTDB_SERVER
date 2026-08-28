@@ -7,6 +7,7 @@ from typing import Any, Iterator
 import numpy as np
 import zarr
 from numcodecs import Blosc
+from numcodecs import blosc
 
 from .config import PipelineConfig
 from .planning import Tile
@@ -18,6 +19,7 @@ def array_sha256(values: np.ndarray) -> str:
 
 
 def compressor(cfg: PipelineConfig) -> Blosc:
+    blosc.set_nthreads(cfg.compression_threads)
     return Blosc(
         cname="zstd",
         clevel=cfg.compression_level,

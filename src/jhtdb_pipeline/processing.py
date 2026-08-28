@@ -135,6 +135,8 @@ def resource_plan(cfg: PipelineConfig) -> dict[str, float]:
         "scratch_peak_GiB": (cfg.bytes_per_snapshot + workspace_bytes) / 1024**3,
         "persistent_result_GiB": cfg.result_uncompressed_bytes / 1024**3,
         "persistent_reserve_GiB": cfg.persistent_safety_reserve_gib,
+        "fft_workers": cfg.fft_workers,
+        "compression_threads": cfg.compression_threads,
         "fft_input_block_MiB": (
             cfg.fft_slab_width
             * cfg.grid_shape[0]
@@ -249,6 +251,7 @@ def process_center(
                 temp_b,
                 sigma,
                 cfg.fft_slab_width,
+                workers=cfg.fft_workers,
             )
             filtered_velocity.flush()
             _copy_crop(
@@ -271,6 +274,7 @@ def process_center(
                     derivative_component,
                     cfg.domain_length,
                     cfg.fft_slab_width,
+                    workers=cfg.fft_workers,
                 )
                 derivative.flush()
                 _copy_crop(
@@ -300,6 +304,7 @@ def process_center(
                 temp_b,
                 sigma,
                 cfg.fft_slab_width,
+                workers=cfg.fft_workers,
             )
             derivative.flush()
             _accumulate_center(
@@ -319,6 +324,7 @@ def process_center(
                     derivative_component,
                     cfg.domain_length,
                     cfg.fft_slab_width,
+                    workers=cfg.fft_workers,
                 )
                 derivative.flush()
                 _copy_crop(
@@ -351,6 +357,7 @@ def process_center(
                 component,
                 cfg.domain_length,
                 cfg.fft_slab_width,
+                workers=cfg.fft_workers,
             )
             for start in range(0, acceleration.shape[0], cfg.fft_slab_width):
                 key = (

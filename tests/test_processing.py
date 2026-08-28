@@ -28,6 +28,7 @@ def fixture(root: Path, *, compressible: bool = False):
         result_root=root / "results",
         persistent_safety_reserve_gib=0.0,
         scratch_safety_reserve_gib=0.0,
+        fft_workers=2,
         fft_slab_width=2,
         cleanup_scratch_on_success=True,
     )
