@@ -91,7 +91,7 @@ shape = (512, 512, 512)
 项目路径：
 
 ```text
-/home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER
+/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
 ```
 
 大型运行目录：
@@ -103,7 +103,7 @@ shape = (512, 512, 512)
 正式结果目录：
 
 ```text
-/home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/results
+/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/results
 ```
 
 ## 5. 安装和认证
@@ -111,7 +111,7 @@ shape = (512, 512, 512)
 在交互容器的 JupyterLab Terminal 中：
 
 ```bash
-cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
 bash scripts/bootstrap.sh
 source .venv/bin/activate
 ```
@@ -144,7 +144,7 @@ python -m jhtdb_pipeline smoke --time-index 1 --config configs/pipeline.yaml
 Jobs 页面选择相同 image、`Turbulence (ceph)`、可写 persistent 和可写 scratch，然后提交：
 
 ```bash
-bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
+bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
 ```
 
 正常执行顺序：
@@ -184,7 +184,7 @@ python -m jhtdb_pipeline gui --config configs/pipeline.yaml
 ## 10. 项目结构
 
 ```text
-JHTDB_SCISERVER/
+JHU_DATA/
 ├── configs/pipeline.yaml
 ├── scripts/
 │   ├── bootstrap.sh

@@ -96,7 +96,7 @@ SciServer Essentials 4.0
 项目使用：
 
 ```text
-/home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER
+/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
 ```
 
 persistent 用于：
@@ -190,9 +190,9 @@ JHTDB tile 和 Zarr chunk 都是服务器内部的读写单位，不是下载分
 
 ```yaml
 platform:
-  state_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/state
+  state_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/state
   run_root: /home/idies/workspace/Temporary/gaoxingqun/scratch/JHTDB_RUNS
-  result_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/results
+  result_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/results
   scratch_retention_hours: 72
 
 auth:
@@ -220,7 +220,7 @@ physics:
 先在 Compute 页面创建一个交互容器，挂载上一节的三个卷。打开 JupyterLab Terminal 后运行：
 
 ```bash
-cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
 bash scripts/bootstrap.sh
 source .venv/bin/activate
 ```
@@ -254,7 +254,7 @@ python -m jhtdb_pipeline auth status --config configs/pipeline.yaml
 在交互容器中依次运行：
 
 ```bash
-cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
 source .venv/bin/activate
 
 python -m jhtdb_pipeline doctor --config configs/pipeline.yaml
@@ -279,7 +279,7 @@ python -m jhtdb_pipeline smoke --time-index 1 --config configs/pipeline.yaml
 命令为：
 
 ```bash
-bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
+bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
 ```
 
 脚本会执行：
@@ -291,7 +291,7 @@ doctor → cache/validate-input → process-center → finalize-result
 运行日志写入：
 
 ```text
-/home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/state/logs
+/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/state/logs
 ```
 
 断点行为：
@@ -330,7 +330,7 @@ python -m jhtdb_pipeline status --config configs/pipeline.yaml
 GUI 在交互容器中运行，不在 Compute Job 中运行：
 
 ```bash
-cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
 source .venv/bin/activate
 python -m jhtdb_pipeline gui --config configs/pipeline.yaml --port 8501
 ```

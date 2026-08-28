@@ -9,7 +9,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 1
 fi
 
-if [[ "$PROJECT_ROOT" != /home/idies/workspace/Storage/*/persistent/JHTDB_SCISERVER ]]; then
+if [[ "$PROJECT_ROOT" != /home/idies/workspace/Storage/*/persistent/JHU_DATA ]]; then
   echo "ERROR: project must be stored in the SciServer persistent volume: $PROJECT_ROOT" >&2
   exit 1
 fi

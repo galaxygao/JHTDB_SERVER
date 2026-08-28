@@ -5,9 +5,9 @@ domain_length: 6.283185307179586
 stored_time_step: 0.002
 
 platform:
-  state_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/state
+  state_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/state
   run_root: /home/idies/workspace/Temporary/gaoxingqun/scratch/JHTDB_RUNS
-  result_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/results
+  result_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/results
   scratch_retention_hours: 72
 
 auth:
