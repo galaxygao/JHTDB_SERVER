@@ -163,7 +163,58 @@ token：
 
 `request_shape` 和 `tile_shape` 含义不同：一个 `512^3` request 从 JHTDB 获取约 1.5 GiB 未压缩速度数据，随后被写成 64 个 `128^3` checksum tile。中断后已验证 tile 会保留；若某个大 request 仍有缺块，续跑时只重新请求该大块。它们都不是本地传输分卷。
 
-下载和物理计算在前台 Terminal 中使用 Rich 动态进度行：旋转线表示进程仍在工作，进度条与计数分别显示 request 完成数和谱计算 `step/33`。该显示只面向当前命令行会话，不写入额外进度文件。
+#### 2.3.1 如何调整计算资源
+
+先在目标容器或 Job 中确认 CPU、内存和磁盘：
+
+```bash
+nproc
+free -h
+df -h /home/idies/workspace/Temporary/gaoxingqun/scratch
+```
+
+| 参数 | 调大后的主要效果 | 调整建议 |
+|---|---|---|
+| `fft_workers` | 使用更多 CPU；也会增加线程调度和内存带宽竞争 | 不要超过 Job 分配的 CPU 核数；依次测试 8、16、32，只有分配到约 32 核时才使用 32 |
+| `fft_slab_width` | 减少 FFT 批次和 Python/memmap 循环，通常更快；瞬时 RAM 增加 | `16/32/64` 分别约为 `64/128/256 MiB` 输入块，实际 FFT 临时内存是输入块的数倍；从 32 调到 64 前先检查 RAM |
+| `compression_threads` | 加快 Zarr 压缩写入，但占用更多 CPU | 通常设为 CPU 核数的 1/4–1/2；不要和 `fft_workers` 一起盲目设满 |
+| `compression_level` | 调大后结果通常更小，但写入更慢 | 速度优先用 1，平衡用当前的 3；不能通过调整它改变物理结果 |
+| `sigma_grid` | 增加独立滤波尺度和正式结果数量 | 计算时间、persistent 结果量近似随尺度个数线性增长；顺序执行不增加单尺度 scratch 峰值 |
+| `cleanup_scratch_on_success` | `false` 会保留每个尺度约 40 GiB workspace | 批量尺度必须保持 `true`，否则多个尺度的 scratch 会累积 |
+
+推荐起点：
+
+```yaml
+# 约 16 CPU 核、内存充足：当前平衡配置
+storage:
+  compression_level: 3
+  compression_threads: 8
+physics:
+  fft_workers: 16
+  fft_slab_width: 32
+  cleanup_scratch_on_success: true
+```
+
+```yaml
+# 写入/速度优先；先确认 slab=64 的瞬时内存可接受
+storage:
+  compression_level: 1
+  compression_threads: 8
+physics:
+  fft_workers: 16
+  fft_slab_width: 64
+  cleanup_scratch_on_success: true
+```
+
+`persistent_capacity_gb_observed` 只记录 Quotas 页面观测值，两个 `*_safety_reserve_gib` 只控制空间预检；降低它们不会加速。`crop_start/crop_shape`、`request_shape/tile_shape` 是当前生产约束，不能把它们当作性能旋钮。`epsilon_abs/epsilon_rel` 只改变 regime 不确定区阈值，基本不影响运行时间。修改配置后先执行 `plan`，确认单尺度/批量 persistent 容量、40 GiB workspace 和约 52 GiB scratch 峰值。
+
+下载和物理计算使用 Rich 进度行，计数分别显示 request 完成数和谱计算 `step/42`。正式脚本为了保存日志使用 `tee`；Rich 因此可能只在阶段结束时显示最终进度，而不是实时刷新，这不代表进程停止。需要在 Interactive Terminal 实时观察时，可直接运行：
+
+```bash
+python -m jhtdb_pipeline single-frame --time-index 1 --config configs/pipeline.yaml
+```
+
+直接命令与 `run_stage.sh` 的物理计算相同，但不自动写入带时间戳的日志。任务是否仍在运行可用 `ps -eo pid,etime,stat,%cpu,%mem,cmd | grep '[j]htdb_pipeline'` 检查；同一帧任务仍在运行时不要重复启动。
 
 ### 2.4 安装
 

@@ -226,6 +226,17 @@ physics:
 
 JHTDB 请求仍严格串行；`fft_workers` 只并行容器内的 FFT。`fft_slab_width: 32` 使单个 FFT 输入块约为 128 MiB，配合 16 个 FFT workers 和 8 个 Blosc 压缩线程使用多核资源，同时继续把约 40 GiB 中间场存入 scratch memmap。
 
+参数调整规则：
+
+- `fft_workers` 不超过 Job 分配的 CPU 核数；可按 8、16、32 逐档实测，线程更多不保证更快；
+- `fft_slab_width=16/32/64` 的单输入块约为 64/128/256 MiB，调大通常减少批次，但 FFT 实际瞬时内存是输入块的数倍；
+- `compression_level=1` 偏速度，`3` 偏平衡；`compression_threads` 通常设为 CPU 核数的 1/4–1/2；
+- sigma 数量使计算时间和 persistent 结果量近似线性增长，但顺序批处理不增加单尺度 scratch 峰值；
+- `cleanup_scratch_on_success` 在批量任务中必须保持 `true`，否则每个尺度约 40 GiB workspace 会累积；
+- safety reserve 和 `persistent_capacity_gb_observed` 不会加速；生产 crop、request 和 tile shape 不作为性能参数修改。
+
+修改 YAML 后运行 `plan` 核对资源。正式脚本通过 `tee` 持久化日志，Rich 进度可能只在阶段结束时显示最终 `42/42`；Interactive Terminal 需要实时进度时可直接运行 `python -m jhtdb_pipeline single-frame --time-index 1 --config configs/pipeline.yaml`。两种入口的物理计算相同，不要在已有任务运行时重复启动。
+
 ## 6. 首次建立环境
 
 先在 Compute 页面创建一个交互容器，挂载上一节的三个卷。打开 JupyterLab Terminal 后运行：
