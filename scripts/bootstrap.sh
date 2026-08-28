@@ -80,6 +80,11 @@ except ImportError as exc:
         f"Underlying import error: {exc}"
     ) from exc
 PY
-python -m pip check
+# Do not run global ``pip check`` here.  ``--system-site-packages`` exposes the
+# complete Essentials 4.0 image, which contains unrelated legacy packages with
+# mutually incompatible metadata (for example TensorFlow and modern
+# Streamlit/protobuf).  The explicit imports above validate this project and
+# the legacy JHTDB runtime without treating those image-wide conflicts as a
+# pipeline failure.
 python -m compileall -q src
 echo "SciServer environment ready: $PROJECT_ROOT/.venv"

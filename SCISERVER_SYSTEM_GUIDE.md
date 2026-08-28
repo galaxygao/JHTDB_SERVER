@@ -229,6 +229,8 @@ source .venv/bin/activate
 
 `bootstrap.sh` 只建立服务器环境和检查依赖，不会访问完整 JHTDB 数据。项目和 `.venv` 都在 persistent，因此新容器和 job 可以继续使用。
 
+Essentials 4.0 的基础环境含 TensorFlow、Dash 等旧包；项目虚拟环境又必须通过 `--system-site-packages` 继承 legacy pyJHTDB。安装时可能出现这些无关包的 dependency-conflict 警告。项目不使用它们，`bootstrap.sh` 以所需模块和 JHTDB runtime 的实际导入作为成功条件，不对整个镜像执行 `pip check`。
+
 ## 7. 配置 JHTDB token
 
 token 不得写入 YAML、Git、Notebook、CLI 参数、日志、QA、manifest 或 GUI。建议在交互 Terminal 中写入项目目录之外的受保护文件：
