@@ -73,6 +73,16 @@ def _version(distribution: str) -> str | None:
         return None
 
 
+def _giverny_runtime_check() -> tuple[bool, str | None]:
+    try:
+        __import__("pyJHTDB")
+        from giverny.turbulence_dataset import turb_dataset  # noqa: F401
+        from giverny.turbulence_toolkit import getCutout  # noqa: F401
+    except (ImportError, OSError) as exc:
+        return False, str(exc)
+    return True, None
+
+
 def doctor(cfg: PipelineConfig, time_index: int | None = None) -> dict[str, Any]:
     storage_text = str(cfg.state_root).replace("\\", "/")
     temporary_text = str(cfg.run_root).replace("\\", "/")
@@ -81,8 +91,11 @@ def doctor(cfg: PipelineConfig, time_index: int | None = None) -> dict[str, Any]
     temporary_path_ok = "/home/idies/workspace/Temporary/" in temporary_text
     packages = {
         name: _version(name)
-        for name in ("giverny", "numpy", "scipy", "zarr", "streamlit")
+        for name in (
+            "giverny", "pyJHTDB", "numpy", "scipy", "zarr", "streamlit"
+        )
     }
+    giverny_runtime_ok, giverny_runtime_error = _giverny_runtime_check()
     checks = {
         "linux": is_linux,
         "storage_path": storage_path_ok,
@@ -92,6 +105,7 @@ def doctor(cfg: PipelineConfig, time_index: int | None = None) -> dict[str, Any]
         "result_writable": bool(is_linux and storage_path_ok and _writable(cfg.result_root)),
         "token_configured": token_source(cfg) is not None,
         "giverny_available": packages["giverny"] is not None,
+        "giverny_runtime": giverny_runtime_ok,
     }
     payload: dict[str, Any] = {
         "checks": checks,
@@ -113,6 +127,7 @@ def doctor(cfg: PipelineConfig, time_index: int | None = None) -> dict[str, Any]
         },
         "token_source": token_source(cfg),
         "packages": packages,
+        "giverny_runtime_error": giverny_runtime_error,
     }
     if time_index is not None:
         record_path = cfg.run_path(time_index) / "run.json"

@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "jhtdb-pipeline"
 version = "0.3.0"
 description = "SciServer-only JHTDB full-periodic center pipeline"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
   "filelock>=3.13,<4",
-  "giverny>=3.6.2,<4",
+  "giverny<4",
   "numcodecs>=0.12,<0.16",
   "numpy>=1.23,<3",
   "plotly>=5,<7",

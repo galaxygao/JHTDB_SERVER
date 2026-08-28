@@ -45,6 +45,15 @@ class AuthTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not configured"):
                 get_token(self.cfg)
 
+    def test_empty_token_file_is_not_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "token"
+            path.touch(mode=0o600)
+            cfg = replace(self.cfg, token_file=path)
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertFalse(has_token(cfg))
+                self.assertIsNone(token_source(cfg))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,10 @@ class SciServerJHTDB:
             from giverny.turbulence_toolkit import getCutout
         except ImportError as exc:
             raise RuntimeError(
-                "SciServer giverny is unavailable; use the SciServer Essentials 4.0 image"
+                "SciServer Giverny runtime cannot be imported. "
+                "isotropic1024coarse requires the functional legacy pyJHTDB runtime "
+                "provided by SciServer Essentials 4.0. "
+                f"Underlying import error: {exc}"
             ) from exc
         output = cfg.run_path(time_index) / "giverny"
         output.mkdir(parents=True, exist_ok=True)

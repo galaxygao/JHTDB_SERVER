@@ -69,6 +69,8 @@ SciServer Essentials 4.0
 
 镜像提供基础 Python/Jupyter 环境。项目用 persistent 中的 `.venv` 补充自己的包，因此交互容器和 job 必须选择兼容的 image。首版不需要自行创建 Docker image。
 
+`SciServer Essentials 6.0` 不适用于当前 `isotropic1024coarse` 流程。该旧数据集仍走 legacy `pyJHTDB` 后端；Essentials 6.0/Python 3.12 会安装已经弃用、导入时主动报错的 `pyJHTDB` 占位包。必须选择自带可用 legacy runtime 的 Essentials 4.0（Python 3.9），保留镜像自带的 Giverny/pyJHTDB，且不能跨镜像复用 6.0 创建的 `.venv`。
+
 ### 3.4 Compute Job
 
 正式计算使用 shell-command Compute Job。特点是：

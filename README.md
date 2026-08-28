@@ -86,7 +86,9 @@ shape = (512, 512, 512)
 | Data Volume | `Turbulence (ceph)` |
 | User Volume | `persistent`，读写 |
 | User Volume | `scratch`，读写 |
-| Python | 3.10 或更高 |
+| Python | Essentials 4.0 自带的 Python 3.9（项目最低要求 3.9） |
+
+不要使用 `SciServer Essentials 6.0` 运行当前 `isotropic1024coarse` 流程。该旧数据集仍会调用 legacy `pyJHTDB`，而 Essentials 6.0/Python 3.12 会取得已经弃用并主动报错的占位版本。必须使用带可用 legacy runtime 的 `SciServer Essentials 4.0`；安装时保留镜像自带的 Giverny/pyJHTDB，不用 PyPI 版本覆盖它们。
 
 项目路径：
 

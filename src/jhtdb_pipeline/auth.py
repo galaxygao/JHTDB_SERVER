@@ -9,7 +9,11 @@ from .config import PipelineConfig
 def token_source(cfg: PipelineConfig) -> str | None:
     if os.environ.get("JHTDB_TOKEN", "").strip():
         return "environment"
-    if cfg.token_file is not None and cfg.token_file.is_file():
+    if (
+        cfg.token_file is not None
+        and cfg.token_file.is_file()
+        and cfg.token_file.stat().st_size > 0
+    ):
         return "file"
     return None
 
