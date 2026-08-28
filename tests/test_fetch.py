@@ -37,6 +37,7 @@ class FetchTests(unittest.TestCase):
             root = Path(temporary)
             token_file = root / "token"
             token_file.write_text("test-token\n", encoding="utf-8")
+            token_file.chmod(0o600)
             cfg = replace(
                 load_config("configs/pipeline.yaml"),
                 grid_shape=(16, 16, 16),
