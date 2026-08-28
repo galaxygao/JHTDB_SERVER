@@ -159,7 +159,7 @@ JHTDB velocity
   → 拆成 512 个 128^3 tile 填入 scratch 全域速度数组
   → tile 覆盖、SHA-256 回读、shape/dtype/有限值验证
   → 在完整 1024^3 周期域上做谱导数和谱高斯滤波
-  → 全域无散度 QA
+  → 原始速度与滤波速度的全域无散度 QA
   → 裁剪 x,y,z = [256,768)
   → 写入 persistent staging
   → 输出字段逐数组校验和散列
@@ -345,6 +345,7 @@ python -m jhtdb_pipeline status --config configs/pipeline.yaml
 | `validate-input --time-index N` | 重新验证完整输入缓存 |
 | `process-center --time-index N --sigma-grid S` | 全域谱处理并写 persistent staging |
 | `finalize-result --time-index N --sigma-grid S` | 校验 staging 并提交正式结果 |
+| `upgrade-result --time-index N --sigma-grid S` | 用已有中心 `gradient_bar` 检查滤波散度并将完整 v2 结果升级为 v3，无需重算 |
 | `single-frame --time-index N [--sigma-grid S]` | 串联完整流程；默认批量处理配置列表，指定参数时只跑一个尺度 |
 | `status` | 列出输入和正式/非正式结果状态 |
 | `gui` | 启动只读服务器 GUI |

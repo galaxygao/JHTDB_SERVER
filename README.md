@@ -153,7 +153,7 @@ token：
 | storage | `compression_level` | Zstd/Blosc 压缩等级 3 |
 | storage | `compression_threads` | 8 个压缩线程 |
 | storage | safety reserve | persistent 15 GiB、scratch 16 GiB |
-| validation | divergence thresholds | 相对 RMS `1e-4`、相对最大值 `1e-3` |
+| validation | divergence thresholds | 原始和滤波速度各自的相对 RMS `1e-4`、相对最大值 `1e-3` |
 | physics | `sigma_grid` | 高斯标准差列表；默认生产配置为 `[1.0,2.0,3.0]` 个网格间距 |
 | physics | `crop_start`, `crop_shape` | `[256,256,256]`, `[512,512,512]` |
 | physics | `epsilon_abs`, `epsilon_rel` | regime 不确定区阈值参数 |
@@ -300,7 +300,7 @@ doctor → cache → validate-input → process-center → finalize-result
 state/logs/single-frame_<UTC timestamp>.log
 ```
 
-省略 `--sigma-grid` 时，命令依次计算配置中的全部 `physics.sigma_grid`；提供该参数时只计算指定尺度。相同 `time-index` 和 `sigma-grid` 的当前完整结果已经存在时，命令会复用它。缺少 `pi/s_bar` 的旧结果会保留到新版 staging 完整计算并通过字段校验，随后由新版结果替换。未完成的输入缓存可断点续跑；`process-center` 的 FFT 工作区中断后会从该计算阶段重新建立。
+省略 `--sigma-grid` 时，命令依次计算配置中的全部 `physics.sigma_grid`；提供该参数时只计算指定尺度。相同 `time-index` 和 `sigma-grid` 的当前完整结果已经存在时，命令会复用它。字段完整的 schema v2 结果会直接读取已保存的 `gradient_bar`，完成中心滤波散度检查并原地升级到 v3，不重新执行 FFT 或四个能量计算；缺少 `pi/s_bar` 的更旧结果仍会保留到新版 staging 完整计算并通过字段校验后再替换。未完成的输入缓存可断点续跑；`process-center` 的 FFT 工作区中断后会从该计算阶段重新建立。
 
 尺度采用顺序批处理，不会同时启动多个约 52 GiB scratch 峰值的 FFT 流程。当前每个尺度的正式结果未压缩约 14.125 GiB，`plan` 会同时报告单尺度和整个配置列表的容量计划。
 
@@ -321,6 +321,9 @@ python -m jhtdb_pipeline process-center --time-index 1 --sigma-grid 1.0 --config
 # 校验 staging 并原子提交正式结果
 python -m jhtdb_pipeline finalize-result --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
+# 仅用已有 gradient_bar 将完整 schema v2 结果升级到 v3
+python -m jhtdb_pipeline upgrade-result --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+
 # 查看输入和正式结果状态
 python -m jhtdb_pipeline status --config configs/pipeline.yaml
 ```
@@ -337,6 +340,7 @@ CLI 命令汇总：
 | `validate-input` | 否 | 完整输入缓存验证 |
 | `process-center` | 否 | 全域谱计算并写 staging |
 | `finalize-result` | 否 | 字段级验证并提交正式结果 |
+| `upgrade-result` | 否 | 从已有 `gradient_bar` 检查中心滤波散度，并将完整 v2 结果原地升级为 v3 |
 | `single-frame` | 是 | 串联完整单帧流程，并顺序批量处理配置的滤波尺度 |
 | `status` | 否 | 输入缓存和正式结果状态 |
 | `gui` | 否 | 启动只读服务器 GUI |
@@ -501,11 +505,11 @@ python -m unittest discover -s tests -v
 - 流式 slab 滤波与内存参考实现数值一致；
 - 常量场经过高斯滤波保持不变；
 - 中心 raw/filtered 字段使用完全相同的空间坐标；
-- 全域相对无散度 RMS 不超过 `1e-4`；
-- 全域相对最大散度不超过 `1e-3`；
+- 原始速度和滤波速度各自的全域相对无散度 RMS 不超过 `1e-4`；
+- 原始速度和滤波速度各自的全域相对最大散度不超过 `1e-3`；
 - regime 阈值和 occupancy 写入 QA。
 
-`process-center` 在散度验证失败时保留失败 staging 供诊断，但不会创建正式结果或 `COMPLETE`。
+`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套统计；顶层 `passed` 只有在两者都通过时才为 `true`。新计算结果的两套 `scope` 都是 `full_domain`。从 v2 原地升级时，原速度沿用既有全域检查，滤波速度从已保存的中心 `gradient_bar` 检查，因此其 `scope` 明确记录为 `stored_center_crop`。`process-center` 在任一速度场散度验证失败时保留失败 staging 供诊断，但不会创建正式结果或 `COMPLETE`。
 
 ### 4.4 输出 Review 与提交规则
 
@@ -518,7 +522,7 @@ python -m unittest discover -s tests -v
 - staging 到正式目录的同文件系统原子 rename；
 - 最后创建包含 manifest hash 的 `COMPLETE`。
 
-当前 schema 的正式目录已存在时拒绝覆盖。缺少 `pi/s_bar` 的旧 schema 结果只会在新版 staging 完成全部校验后被替换。GUI 也要求目录具有 `COMPLETE` 且 Zarr attrs 的状态为 `complete`，因此不会把部分写入结果当成正式数据。
+当前 schema 的正式目录已存在时拒绝覆盖。字段完整的 v2 结果可直接升级元数据；缺少 `pi/s_bar` 的旧 schema 结果只会在新版 staging 完成全部校验后被替换。GUI 也要求目录具有 `COMPLETE` 且 Zarr attrs 的状态为 `complete`，因此不会把部分写入结果当成正式数据。
 
 Review 正式结果时执行：
 
@@ -545,7 +549,7 @@ center_result_sigma_<sigma_tag>.zarr/
 - 配置加载器拒绝未知字段和不符合生产约束的 shape/path/阈值；
 - 处理锁防止同一计算工作区被并发写入；
 - 删除临时工作区前验证目标位于预期 scratch 父目录；
-- persistent 提交不覆盖当前 schema 的正式结果；旧 schema 只在新版校验完成后替换；
+- persistent 提交不覆盖当前 schema 的正式结果；完整 v2 可原地升级，其他旧 schema 只在新版校验完成后替换；
 - GUI 以只读模式打开 Zarr，不提供上传、编辑或删除操作；
 - `doctor` 在正式任务前检查 persistent/scratch 写权限、空间余量和 scratch 到期状态。
 

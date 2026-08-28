@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
-from jhtdb_pipeline.cli import _run_single_frame, _selected_sigmas
+from jhtdb_pipeline.cli import _run_single_frame, _selected_sigmas, build_parser
 
 
 class CliBatchTests(unittest.TestCase):
@@ -15,6 +15,14 @@ class CliBatchTests(unittest.TestCase):
     def test_configured_sigmas_are_selected_without_override(self) -> None:
         self.assertEqual(_selected_sigmas(self.cfg, None), (1.0, 2.0, 3.0))
         self.assertEqual(_selected_sigmas(self.cfg, 2.5), (2.5,))
+
+    def test_upgrade_result_accepts_frame_and_sigma(self) -> None:
+        args = build_parser().parse_args(
+            ["upgrade-result", "--time-index", "7", "--sigma-grid", "2.0"]
+        )
+        self.assertEqual(args.command, "upgrade-result")
+        self.assertEqual(args.time_index, 7)
+        self.assertEqual(args.sigma_grid, 2.0)
 
     @patch("jhtdb_pipeline.cli.finalize_result")
     @patch("jhtdb_pipeline.cli.process_center")

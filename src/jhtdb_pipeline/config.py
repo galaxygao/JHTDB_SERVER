@@ -9,7 +9,7 @@ from typing import Any, Mapping
 import yaml
 
 
-RESULT_SCHEMA_VERSION = 2
+RESULT_SCHEMA_VERSION = 3
 
 
 def _tuple3(value: Any, name: str) -> tuple[int, int, int]:

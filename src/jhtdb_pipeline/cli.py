@@ -13,7 +13,7 @@ from .config import load_config
 from .doctor import doctor
 from .jhtdb import fetch_snapshot, smoke
 from .planning import plan
-from .processing import finalize_result, process_center, resource_plan
+from .processing import finalize_result, process_center, resource_plan, upgrade_result
 from .validation import validate_snapshot
 
 
@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             _config(command)
 
-    for name in ("process-center", "finalize-result", "single-frame"):
+    for name in ("process-center", "finalize-result", "single-frame", "upgrade-result"):
         command = commands.add_parser(name)
         _frame(command)
         _sigma(command)
@@ -163,6 +163,13 @@ def main(argv: list[str] | None = None) -> int:
             _print_paths(
                 [
                     finalize_result(cfg, args.time_index, sigma)
+                    for sigma in _selected_sigmas(cfg, args.sigma_grid)
+                ]
+            )
+        elif args.command == "upgrade-result":
+            _print_paths(
+                [
+                    upgrade_result(cfg, args.time_index, sigma)
                     for sigma in _selected_sigmas(cfg, args.sigma_grid)
                 ]
             )

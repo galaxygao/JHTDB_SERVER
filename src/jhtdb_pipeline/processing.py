@@ -58,6 +58,26 @@ def _complete_result_is_current(path: Path, sigma_grid: float) -> bool:
         return False
 
 
+def _complete_result_is_upgradeable(path: Path, sigma_grid: float) -> bool:
+    if not (path / "COMPLETE").is_file():
+        return False
+    zarr_path = path / result_zarr_name(sigma_grid)
+    manifest_path = path / "manifest.json"
+    if not zarr_path.is_dir() or not manifest_path.is_file():
+        return False
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return (
+            root.attrs.get("status") == "complete"
+            and root.attrs.get("result_schema_version") == 2
+            and manifest.get("schema_version") == 2
+            and all(name in root for name in RESULT_FIELDS)
+        )
+    except Exception:
+        return False
+
+
 def _safe_rmtree(path: Path, required_parent: Path) -> None:
     resolved = path.resolve(strict=False)
     parent = required_parent.resolve(strict=False)
@@ -137,6 +157,18 @@ def _accumulate_crop(cfg: PipelineConfig, destination: Any, source: Any) -> None
         destination[relative] = current + values
 
 
+def _accumulate_full(destination: Any, source: Any, slab: int) -> None:
+    for start in range(0, destination.shape[0], slab):
+        key = (
+            slice(start, min(start + slab, destination.shape[0])),
+            slice(None),
+            slice(None),
+        )
+        destination[key] = np.asarray(
+            destination[key], dtype=np.float32
+        ) + np.asarray(source[key], dtype=np.float32)
+
+
 def _field_statistics(field: Any, slab: int) -> tuple[float, float, int]:
     sumsq = 0.0
     maximum = 0.0
@@ -152,6 +184,34 @@ def _field_statistics(field: Any, slab: int) -> tuple[float, float, int]:
         maximum = max(maximum, float(np.max(np.abs(values))))
         count += values.size
     return sumsq, maximum, count
+
+
+def _divergence_metrics(
+    cfg: PipelineConfig,
+    divergence_sumsq: float,
+    divergence_maximum: float,
+    point_count: int,
+    gradient_sumsq: float,
+    gradient_maximum: float,
+    gradient_count: int,
+) -> dict[str, float | int | bool | str]:
+    divergence_rms = float(np.sqrt(divergence_sumsq / point_count))
+    gradient_rms = float(np.sqrt(gradient_sumsq / gradient_count))
+    relative_rms = divergence_rms / max(gradient_rms, 1.0e-30)
+    relative_maximum = divergence_maximum / max(gradient_maximum, 1.0e-30)
+    return {
+        "passed": (
+            relative_rms <= cfg.divergence_relative_rms_max
+            and relative_maximum <= cfg.divergence_relative_max_max
+        ),
+        "divergence_rms": divergence_rms,
+        "gradient_rms": gradient_rms,
+        "relative_divergence_rms": relative_rms,
+        "maximum_abs_divergence": divergence_maximum,
+        "maximum_abs_gradient_component": gradient_maximum,
+        "relative_maximum_divergence": relative_maximum,
+        "point_count": point_count,
+    }
 
 
 def resource_plan(cfg: PipelineConfig) -> dict[str, float]:
@@ -226,6 +286,8 @@ def process_center(
     final = cfg.result_path(time_index, sigma)
     if _complete_result_is_current(final, sigma):
         return final
+    if _complete_result_is_upgradeable(final, sigma):
+        return upgrade_result(cfg, time_index, sigma)
     _preflight_result_space(cfg)
     _preflight_workspace_space(cfg, time_index)
 
@@ -268,6 +330,9 @@ def process_center(
     gradient_sumsq = 0.0
     gradient_maximum = 0.0
     gradient_count = 0
+    filtered_gradient_sumsq = 0.0
+    filtered_gradient_maximum = 0.0
+    filtered_gradient_count = 0
 
     with lock, Progress(
         SpinnerColumn("line"),
@@ -308,6 +373,8 @@ def process_center(
         _zero_zarr(result["work_resolved"])
         _zero_zarr(result["pi"])
         _zero_zarr(result["s_bar"])
+        filtered_divergence = ComponentView(sgs_transport, 0)
+        zero_field(filtered_divergence, cfg.fft_slab_width)
 
         for component in range(3):
             zero_field(acceleration, cfg.fft_slab_width)
@@ -377,6 +444,20 @@ def process_center(
                     result["gradient_bar"],
                     (component, derivative_component),
                 )
+                sumsq, maximum, count = _field_statistics(
+                    derivative, cfg.fft_slab_width
+                )
+                filtered_gradient_sumsq += sumsq
+                filtered_gradient_maximum = max(
+                    filtered_gradient_maximum, maximum
+                )
+                filtered_gradient_count += count
+                if derivative_component == component:
+                    _accumulate_full(
+                        filtered_divergence,
+                        derivative,
+                        cfg.fft_slab_width,
+                    )
                 accumulate_product(
                     acceleration,
                     ComponentView(filtered_velocity, derivative_component),
@@ -392,6 +473,12 @@ def process_center(
                 acceleration,
             )
             progress.advance(task)
+
+        (
+            filtered_divergence_sumsq,
+            filtered_divergence_maximum,
+            filtered_point_count,
+        ) = _field_statistics(filtered_divergence, cfg.fft_slab_width)
 
         for component in range(3):
             zero_field(ComponentView(sgs_transport, component), cfg.fft_slab_width)
@@ -496,22 +583,33 @@ def process_center(
         sgs_transport,
     ):
         close_memmap(mapped)
-    divergence_rms = float(np.sqrt(divergence_sumsq / point_count))
-    gradient_rms = float(np.sqrt(gradient_sumsq / gradient_count))
-    relative_rms = divergence_rms / max(gradient_rms, 1.0e-30)
-    relative_maximum = divergence_maximum / max(gradient_maximum, 1.0e-30)
+    unfiltered_divergence_report = _divergence_metrics(
+        cfg,
+        divergence_sumsq,
+        divergence_maximum,
+        point_count,
+        gradient_sumsq,
+        gradient_maximum,
+        gradient_count,
+    )
+    unfiltered_divergence_report["scope"] = "full_domain"
+    filtered_divergence_report = _divergence_metrics(
+        cfg,
+        filtered_divergence_sumsq,
+        filtered_divergence_maximum,
+        filtered_point_count,
+        filtered_gradient_sumsq,
+        filtered_gradient_maximum,
+        filtered_gradient_count,
+    )
+    filtered_divergence_report["scope"] = "full_domain"
     divergence_report = {
-        "passed": (
-            relative_rms <= cfg.divergence_relative_rms_max
-            and relative_maximum <= cfg.divergence_relative_max_max
+        "passed": bool(
+            unfiltered_divergence_report["passed"]
+            and filtered_divergence_report["passed"]
         ),
-        "divergence_rms": divergence_rms,
-        "gradient_rms": gradient_rms,
-        "relative_divergence_rms": relative_rms,
-        "maximum_abs_divergence": divergence_maximum,
-        "maximum_abs_gradient_component": gradient_maximum,
-        "relative_maximum_divergence": relative_maximum,
-        "point_count": point_count,
+        "unfiltered": unfiltered_divergence_report,
+        "filtered": filtered_divergence_report,
     }
     atomic_json(
         staging / "divergence.json", divergence_report
@@ -520,7 +618,14 @@ def process_center(
         result.attrs["status"] = "failed_divergence"
         raise RuntimeError(
             "full-domain divergence validation failed: "
-            f"relative_rms={relative_rms:.3e}, relative_max={relative_maximum:.3e}"
+            "unfiltered_relative_rms="
+            f"{unfiltered_divergence_report['relative_divergence_rms']:.3e}, "
+            "unfiltered_relative_max="
+            f"{unfiltered_divergence_report['relative_maximum_divergence']:.3e}, "
+            "filtered_relative_rms="
+            f"{filtered_divergence_report['relative_divergence_rms']:.3e}, "
+            "filtered_relative_max="
+            f"{filtered_divergence_report['relative_maximum_divergence']:.3e}"
         )
 
     full_sumsq = 0.0
@@ -684,4 +789,147 @@ def finalize_result(
     if cfg.cleanup_scratch_on_success:
         workspace = cfg.workspace_path(time_index, sigma)
         _safe_rmtree(workspace, cfg.run_path(time_index))
+    return final
+
+
+def _stored_filtered_divergence_metrics(
+    cfg: PipelineConfig, root: Any
+) -> dict[str, float | int | bool | str]:
+    gradient = root["gradient_bar"]
+    expected_shape = (3, 3, *cfg.result_shape_zyx)
+    if tuple(gradient.shape) != expected_shape or np.dtype(gradient.dtype) != np.dtype(
+        "<f4"
+    ):
+        raise RuntimeError("stored filtered gradient has an unexpected schema")
+
+    divergence_sumsq = 0.0
+    divergence_maximum = 0.0
+    point_count = 0
+    gradient_sumsq = 0.0
+    gradient_maximum = 0.0
+    gradient_count = 0
+    chunks = tuple(int(value) for value in gradient.chunks[-3:])
+    for key in _spatial_keys(cfg.result_shape_zyx, chunks):
+        block_shape = tuple(item.stop - item.start for item in key)
+        divergence = np.zeros(block_shape, dtype=np.float32)
+        for component in range(3):
+            for derivative_component in range(3):
+                values = np.asarray(
+                    gradient[(component, derivative_component) + key],
+                    dtype=np.float32,
+                )
+                if not np.all(np.isfinite(values)):
+                    raise ValueError("stored filtered gradient contains NaN or Inf")
+                gradient_sumsq += float(np.square(values, dtype=np.float64).sum())
+                gradient_maximum = max(
+                    gradient_maximum, float(np.max(np.abs(values)))
+                )
+                gradient_count += values.size
+                if component == derivative_component:
+                    divergence += values
+        divergence_sumsq += float(
+            np.square(divergence, dtype=np.float64).sum()
+        )
+        divergence_maximum = max(
+            divergence_maximum, float(np.max(np.abs(divergence)))
+        )
+        point_count += divergence.size
+
+    report = _divergence_metrics(
+        cfg,
+        divergence_sumsq,
+        divergence_maximum,
+        point_count,
+        gradient_sumsq,
+        gradient_maximum,
+        gradient_count,
+    )
+    report["scope"] = "stored_center_crop"
+    return report
+
+
+def upgrade_result(
+    cfg: PipelineConfig,
+    time_index: int,
+    sigma_grid: float | None = None,
+) -> Path:
+    """Upgrade a complete v2 result using its stored filtered gradient."""
+    sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
+    final = cfg.result_path(time_index, sigma)
+    if _complete_result_is_current(final, sigma):
+        return final
+    if not _complete_result_is_upgradeable(final, sigma):
+        raise RuntimeError("complete schema-v2 result is not upgradeable in place")
+
+    manifest_path = final / "manifest.json"
+    qa_path = final / "qa.json"
+    divergence_path = final / "divergence.json"
+    complete_path = final / "COMPLETE"
+    if not qa_path.is_file() or not divergence_path.is_file():
+        raise RuntimeError("schema-v2 result is missing QA metadata")
+
+    root = zarr.open_group(str(final / result_zarr_name(sigma)), mode="a")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    qa = json.loads(qa_path.read_text(encoding="utf-8"))
+    old_divergence = json.loads(divergence_path.read_text(encoding="utf-8"))
+    if "unfiltered" in old_divergence:
+        unfiltered_report = dict(old_divergence["unfiltered"])
+    else:
+        unfiltered_report = dict(old_divergence)
+    unfiltered_report["scope"] = "full_domain"
+    if not unfiltered_report.get("passed"):
+        raise RuntimeError("stored unfiltered velocity did not pass divergence QA")
+
+    filtered_report = _stored_filtered_divergence_metrics(cfg, root)
+    if not filtered_report["passed"]:
+        raise RuntimeError(
+            "stored filtered velocity failed center-crop divergence validation: "
+            f"relative_rms={filtered_report['relative_divergence_rms']:.3e}, "
+            f"relative_max={filtered_report['relative_maximum_divergence']:.3e}"
+        )
+    divergence_report = {
+        "passed": True,
+        "unfiltered": unfiltered_report,
+        "filtered": filtered_report,
+    }
+    validation_scope = {
+        "unfiltered": "full_domain",
+        "filtered": "stored_center_crop",
+    }
+    qa["divergence"] = divergence_report
+    manifest["schema_version"] = RESULT_SCHEMA_VERSION
+    manifest["divergence_validation_scope"] = validation_scope
+
+    original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_qa = json.loads(qa_path.read_text(encoding="utf-8"))
+    original_divergence = json.loads(divergence_path.read_text(encoding="utf-8"))
+    original_complete = json.loads(complete_path.read_text(encoding="utf-8"))
+    original_schema_version = root.attrs.get("result_schema_version")
+    original_manifest_hash = root.attrs.get("manifest_hash")
+    try:
+        atomic_json(divergence_path, divergence_report)
+        atomic_json(qa_path, qa)
+        manifest_hash = atomic_json(manifest_path, manifest)
+        root.attrs.update(
+            {
+                "result_schema_version": RESULT_SCHEMA_VERSION,
+                "manifest_hash": manifest_hash,
+                "divergence_validation_scope": validation_scope,
+            }
+        )
+        atomic_json(complete_path, {"manifest_hash": manifest_hash})
+    except Exception:
+        atomic_json(divergence_path, original_divergence)
+        atomic_json(qa_path, original_qa)
+        atomic_json(manifest_path, original_manifest)
+        atomic_json(complete_path, original_complete)
+        root.attrs.update(
+            {
+                "result_schema_version": original_schema_version,
+                "manifest_hash": original_manifest_hash,
+            }
+        )
+        if "divergence_validation_scope" in root.attrs:
+            del root.attrs["divergence_validation_scope"]
+        raise
     return final
