@@ -37,11 +37,40 @@ class Tile:
         )
 
 
+def _blocks_for(
+    grid_shape: tuple[int, int, int], block_shape: tuple[int, int, int]
+) -> list[Tile]:
+    gx, gy, gz = grid_shape
+    tx, ty, tz = block_shape
+    return [
+        Tile(x, y, z, min(tx, gx - x), min(ty, gy - y), min(tz, gz - z))
+        for z, y, x in product(
+            range(0, gz, tz), range(0, gy, ty), range(0, gx, tx)
+        )
+    ]
+
+
 def tiles_for(cfg: PipelineConfig) -> list[Tile]:
-    gx, gy, gz = cfg.grid_shape
-    tx, ty, tz = cfg.tile_shape
-    return [Tile(x, y, z, min(tx, gx - x), min(ty, gy - y), min(tz, gz - z))
-            for z, y, x in product(range(0, gz, tz), range(0, gy, ty), range(0, gx, tx))]
+    """Return the 128^3 storage/checksum tiles."""
+    return _blocks_for(cfg.grid_shape, cfg.tile_shape)
+
+
+def requests_for(cfg: PipelineConfig) -> list[Tile]:
+    """Return the larger, strictly serial SciServer GetCutout requests."""
+    return _blocks_for(cfg.grid_shape, cfg.request_shape)
+
+
+def tiles_in_request(request: Tile, tiles: list[Tile]) -> list[Tile]:
+    return [
+        tile
+        for tile in tiles
+        if request.x0 <= tile.x0
+        and tile.x0 + tile.nx <= request.x0 + request.nx
+        and request.y0 <= tile.y0
+        and tile.y0 + tile.ny <= request.y0 + request.ny
+        and request.z0 <= tile.z0
+        and tile.z0 + tile.nz <= request.z0 + request.nz
+    ]
 
 
 def coordinate_for_index(index: int, point_count: int, domain_length: float) -> float:
@@ -54,7 +83,11 @@ def plan(cfg: PipelineConfig, time_index: int) -> dict[str, object]:
     if time_index < 1:
         raise ValueError("time_index must be >= 1")
     tiles = tiles_for(cfg)
+    requests = requests_for(cfg)
     tile_bytes = cfg.tile_shape[0] * cfg.tile_shape[1] * cfg.tile_shape[2] * 3 * 4
+    request_bytes = (
+        cfg.request_shape[0] * cfg.request_shape[1] * cfg.request_shape[2] * 3 * 4
+    )
     return {
         "dataset": cfg.dataset,
         "variable": cfg.variable,
@@ -62,10 +95,13 @@ def plan(cfg: PipelineConfig, time_index: int) -> dict[str, object]:
         "time_index": time_index,
         "physical_time": cfg.physical_time(time_index),
         "grid_shape": list(cfg.grid_shape),
-        "tile_shape": list(cfg.tile_shape),
+        "request_shape": list(cfg.request_shape),
+        "store_tile_shape": list(cfg.tile_shape),
         "strictly_serial": True,
-        "requests_if_no_retry": len(tiles),
-        "tile_uncompressed_MiB": round(tile_bytes / 1024**2, 2),
+        "requests_if_no_retry": len(requests),
+        "request_uncompressed_GiB": round(request_bytes / 1024**3, 3),
+        "checksum_tiles": len(tiles),
+        "store_tile_uncompressed_MiB": round(tile_bytes / 1024**2, 2),
         "snapshot_uncompressed_GiB": round(cfg.bytes_per_snapshot / 1024**3, 2),
         "result_crop_start_xyz": list(cfg.crop_start),
         "result_crop_shape_xyz": list(cfg.crop_shape),

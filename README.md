@@ -7,8 +7,8 @@
 ## 1. 运行架构
 
 ```text
-JHTDB / Turbulence (ceph)
-        │ 128^3 tile，严格串行
+JHTDB legacy cutout（SciServer Giverny）
+        │ 8 个 512^3 请求，严格串行
         ▼
 scratch：完整 1024^3 × 3 速度缓存
         │ 全周期域谱导数与谱高斯滤波
@@ -25,7 +25,7 @@ persistent：results/<run_id> + COMPLETE
 
 - Interactive Compute container：环境准备、`doctor`、测试、`smoke` 和服务器 GUI；
 - shell-command Compute Job：当前用于正式单帧计算；多尺度流程在首帧验收后另行实现；
-- `Turbulence (ceph)`：JHTDB 数据访问；
+- `Turbulence (ceph)`：Giverny 所需的数据/metadata 挂载；`isotropic1024coarse` 的实际 cutout 仍走 legacy pyJHTDB；
 - `scratch`：全域速度、FFT/memmap 和其他可重建中间量；
 - `persistent`：代码、环境、状态、QA、manifest 和正式中心结果。
 
@@ -42,7 +42,8 @@ persistent：results/<run_id> + COMPLETE
 - 完整网格：`1024^3`；
 - 周期域：`[0, 2π)^3`；
 - 内部轴顺序：`(component, z, y, x)`；
-- JHTDB tile：`128^3`，同一时刻只允许一个请求在途。
+- JHTDB request：`512^3`，完整帧共 8 个，同一时刻只允许一个请求在途；
+- scratch 校验 tile：`128^3`，完整帧共 512 个。
 
 所有 FFT、谱导数和谱滤波必须先在完整 `1024^3` 周期域完成。之后才提取三个轴相同的半开区间：
 
@@ -69,10 +70,13 @@ shape = (512, 512, 512)
 
 ## 3. 分块含义
 
-项目只保留两种服务器内部 chunk：
+项目保留三种服务器内部 block/chunk：
 
-1. JHTDB `128^3` tile：限制单次请求、支持串行获取和断点恢复；
-2. Zarr chunk：支持增量写入、回读校验和 GUI 二维切片。
+1. JHTDB `512^3` request block：每块约 1.5 GiB，8 个请求严格串行；
+2. `128^3` checksum tile：每个 request 拆成 64 块写入、回读并计算 SHA-256；
+3. Zarr chunk：支持增量写入和 GUI 二维切片。
+
+请求块与存储校验块明确解耦。任务中断后保留所有已验证的 `128^3` tile；若某个 `512^3` request 尚有缺块，只重新请求对应的大块，不生成第二份完整速度场。
 
 它们不是传输分卷。项目不生成 `tar.zst`、`part-*` 或本地归档。
 

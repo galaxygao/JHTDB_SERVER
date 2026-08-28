@@ -14,7 +14,7 @@ from .auth import get_token
 from .catalog import Catalog
 from .config import PipelineConfig
 from .doctor import ensure_run_record
-from .planning import Tile, tiles_for
+from .planning import Tile, requests_for, tiles_for, tiles_in_request
 from .store import VelocityStore, array_sha256
 
 
@@ -73,6 +73,28 @@ def canonicalize_cutout(values: np.ndarray, tile: Tile) -> np.ndarray:
     return canonical
 
 
+def chunk_from_request(values: np.ndarray, request: Tile, tile: Tile) -> np.ndarray:
+    """Copy one canonical checksum tile from a larger canonical request block."""
+    expected_request = (3, request.nz, request.ny, request.nx)
+    if values.shape != expected_request:
+        raise ValueError(
+            f"request array shape {values.shape}, expected {expected_request}"
+        )
+    relative = (
+        slice(None),
+        slice(tile.z0 - request.z0, tile.z0 - request.z0 + tile.nz),
+        slice(tile.y0 - request.y0, tile.y0 - request.y0 + tile.ny),
+        slice(tile.x0 - request.x0, tile.x0 - request.x0 + tile.nx),
+    )
+    chunk = np.ascontiguousarray(values[relative], dtype="<f4")
+    expected_tile = (3, tile.nz, tile.ny, tile.nx)
+    if chunk.shape != expected_tile:
+        raise ValueError(
+            f"tile {tile.key} is not contained in request {request.key}"
+        )
+    return chunk
+
+
 def scratch_space(cfg: PipelineConfig, time_index: int) -> dict[str, float]:
     path = cfg.run_root
     path.mkdir(parents=True, exist_ok=True)
@@ -126,6 +148,7 @@ def fetch_snapshot(cfg: PipelineConfig, time_index: int) -> Path:
     with lock:
         client = SciServerJHTDB(cfg, token, time_index)
         tiles = tiles_for(cfg)
+        requests = requests_for(cfg)
         store = VelocityStore(cfg, time_index)
         store.ensure_array()
         with Catalog(cfg.catalog_path) as catalog:
@@ -142,44 +165,74 @@ def fetch_snapshot(cfg: PipelineConfig, time_index: int) -> Path:
                 console=console,
             ) as progress:
                 task = progress.add_task(
-                    f"frame {time_index}", total=len(tiles), state="starting"
+                    f"frame {time_index}", total=len(requests), state="starting"
                 )
-                for tile_number, tile in enumerate(tiles, start=1):
-                    row = catalog.tile(cfg.dataset, time_index, tile.key)
-                    if row is not None and row["status"] == "verified" and row["sha256"]:
-                        readback = np.ascontiguousarray(
-                            store.array[tile.store_slices], dtype="<f4"
+                for request_number, request in enumerate(requests, start=1):
+                    request_tiles = tiles_in_request(request, tiles)
+                    pending: list[Tile] = []
+                    for tile in request_tiles:
+                        row = catalog.tile(cfg.dataset, time_index, tile.key)
+                        if (
+                            row is not None
+                            and row["status"] == "verified"
+                            and row["sha256"]
+                        ):
+                            readback = np.ascontiguousarray(
+                                store.array[tile.store_slices], dtype="<f4"
+                            )
+                            if array_sha256(readback) == row["sha256"]:
+                                continue
+                        pending.append(tile)
+                    if not pending:
+                        progress.update(
+                            task,
+                            advance=1,
+                            state=f"verified request {request_number}/{len(requests)}",
                         )
-                        if array_sha256(readback) == row["sha256"]:
-                            progress.update(task, advance=1, state=f"verified {tile.key}")
-                            continue
+                        continue
                     last_error: Exception | None = None
                     for attempt in range(1, cfg.retries + 1):
-                        catalog.mark_attempt(cfg.dataset, time_index, tile.key)
+                        for tile in pending:
+                            catalog.mark_attempt(cfg.dataset, time_index, tile.key)
                         progress.update(
-                            task, state=f"{tile.key} attempt {attempt}/{cfg.retries}"
+                            task,
+                            state=(
+                                f"request {request_number}/{len(requests)} "
+                                f"attempt {attempt}/{cfg.retries}"
+                            ),
                         )
+                        values: np.ndarray | None = None
                         try:
-                            values = client.fetch_tile(tile, time_index)
-                            digest = store.write_tile(tile, values)
-                            catalog.mark_verified(
-                                cfg.dataset, time_index, tile.key, digest, values.nbytes
-                            )
+                            values = client.fetch_tile(request, time_index)
+                            for tile in pending:
+                                chunk = chunk_from_request(values, request, tile)
+                                digest = store.write_tile(tile, chunk)
+                                catalog.mark_verified(
+                                    cfg.dataset,
+                                    time_index,
+                                    tile.key,
+                                    digest,
+                                    chunk.nbytes,
+                                )
                             last_error = None
                             break
                         except Exception as exc:
                             last_error = exc
                             message = str(exc).replace(token, "<redacted>")
-                            console.print(f"[red]{tile.key} failed:[/red] {message}")
+                            console.print(
+                                f"[red]request {request.key} failed:[/red] {message}"
+                            )
                             if attempt < cfg.retries:
                                 time.sleep(cfg.backoff_seconds * attempt)
+                        finally:
+                            del values
                     if last_error is not None:
                         catalog.set_snapshot_status(cfg.dataset, time_index, "partial")
                         raise last_error
                     progress.update(
                         task,
                         advance=1,
-                        state=f"verified {tile_number}/{len(tiles)}",
+                        state=f"verified request {request_number}/{len(requests)}",
                     )
                     if cfg.request_cooldown_seconds:
                         time.sleep(cfg.request_cooldown_seconds)

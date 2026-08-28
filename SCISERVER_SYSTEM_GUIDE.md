@@ -83,9 +83,9 @@ SciServer Essentials 4.0
 
 ### 3.5 Turbulence (ceph)
 
-这是 SciServer 的 JHTDB 数据访问卷。项目使用原生 `giverny`，以 `128^3` tile 严格串行读取 `isotropic1024coarse` 的 velocity。
+这是 SciServer 的 JHTDB 数据与 metadata 挂载。项目使用原生 `giverny`；但 `isotropic1024coarse` 属于其 legacy pyJHTDB 路径，并非直接读取新式 Ceph/Zarr 数据。项目因此以 8 个 `512^3` request block 严格串行读取 velocity，避免对 legacy gSOAP 重复执行 512 次小请求。
 
-每个 tile 直接填入 scratch 中预分配的完整速度 Zarr 数组。这里的“分块”是请求和断点恢复单位，不会先生成大量待拼接的小文件包，也不会建立第二份完整速度副本。
+每个 request 在内存中拆成 64 个 `128^3` checksum tile，逐块填入 scratch 中预分配的完整速度 Zarr 数组并做回读 SHA-256。大请求减少 legacy pyJHTDB/gSOAP 初始化和网络往返；小存储块保留细粒度完整性检查。不会先生成待拼接的分卷包，也不会建立第二份完整速度副本。
 
 ### 3.6 persistent
 
@@ -155,7 +155,8 @@ results/
 
 ```text
 JHTDB velocity
-  → 512 个 128^3 tile 串行填入 scratch 全域速度数组
+  → 8 个 512^3 request block 严格串行获取
+  → 拆成 512 个 128^3 tile 填入 scratch 全域速度数组
   → tile 覆盖、SHA-256 回读、shape/dtype/有限值验证
   → 在完整 1024^3 周期域上做谱导数和谱高斯滤波
   → 全域无散度 QA
@@ -175,7 +176,7 @@ JHTDB velocity
 - `work_full`、`work_resolved`；
 - `regime`。
 
-JHTDB tile 和 Zarr chunk 都是服务器内部的读写单位，不是下载分卷。项目不生成归档包或传输分卷。
+JHTDB request block、checksum tile 和 Zarr chunk 都是服务器内部的读写单位，不是下载分卷。项目不生成归档包或传输分卷。
 
 ## 5. 平台配置
 
@@ -201,6 +202,7 @@ auth:
   token_file: /home/idies/workspace/Storage/gaoxingqun/persistent/.secrets/jhtdb_token
 
 jhtdb:
+  request_shape: [512, 512, 512]
   tile_shape: [128, 128, 128]
 
 storage:
@@ -305,7 +307,7 @@ doctor → cache/validate-input → process-center → finalize-result
 
 断点行为：
 
-- 已验证的 JHTDB tile 会回读 SHA-256 后跳过，下载阶段可续跑；
+- 已验证的 `128^3` tile 会回读 SHA-256 后跳过；某个 `512^3` request 仍有缺块时只重新请求该大块；
 - 谱处理若中断，会清理同一 result 的旧 staging/workspace 并从处理阶段开头重算；
 - 已存在且带 `COMPLETE` 的相同 `time_index + sigma_grid` 结果不会被覆盖；
 - 失败的 staging 不会出现在 GUI 正式结果列表中。
@@ -354,7 +356,7 @@ python -m jhtdb_pipeline gui --config configs/pipeline.yaml --port 8501
 |---|---|
 | 浏览器关闭 | 已提交 job 继续运行；之后回 Jobs 页面查看 |
 | 交互容器停止 | 重新启动容器；persistent 和未过期 scratch 仍按平台规则存在 |
-| tile 请求失败 | 相同 job 命令复跑；已验证 tile 会跳过 |
+| request 请求失败 | 相同命令复跑；已验证 tile 会跳过，只重取含缺块的 request |
 | scratch run 接近或超过 72 小时 | 不再信任缓存；清理该 scratch run 后重新获取 |
 | 谱处理或 staging 中断 | 相同参数复跑；处理阶段从头重算，正式结果不受影响 |
 | persistent 空间不足 | 停止新结果写入，先核对 Quotas；不要删除正式结果来掩盖容量规划错误 |

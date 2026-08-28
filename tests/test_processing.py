@@ -20,6 +20,7 @@ def fixture(root: Path, *, compressible: bool = False):
     cfg = replace(
         load_config("configs/pipeline.yaml"),
         grid_shape=(16, 16, 16),
+        request_shape=(16, 16, 16),
         tile_shape=(8, 8, 8),
         crop_start=(4, 4, 4),
         crop_shape=(8, 8, 8),

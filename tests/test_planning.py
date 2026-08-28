@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from jhtdb_pipeline.config import load_config
-from jhtdb_pipeline.planning import plan, tiles_for
+from jhtdb_pipeline.planning import plan, requests_for, tiles_for, tiles_in_request
 
 
 class PlanningTests(unittest.TestCase):
@@ -23,7 +23,19 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(result["time_index"], 3)
         self.assertEqual(result["physical_time"], 0.004)
         self.assertTrue(result["strictly_serial"])
-        self.assertEqual(result["requests_if_no_retry"], 512)
+        self.assertEqual(result["requests_if_no_retry"], 8)
+        self.assertEqual(result["checksum_tiles"], 512)
+
+    def test_eight_requests_each_contain_64_checksum_tiles(self):
+        tiles = tiles_for(self.cfg)
+        requests = requests_for(self.cfg)
+        self.assertEqual(len(requests), 8)
+        grouped = [tiles_in_request(request, tiles) for request in requests]
+        self.assertTrue(all(len(group) == 64 for group in grouped))
+        self.assertEqual(
+            {tile.key for group in grouped for tile in group},
+            {tile.key for tile in tiles},
+        )
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ auth:
   token_file: /home/idies/workspace/Storage/gaoxingqun/persistent/.secrets/jhtdb_token
 
 jhtdb:
+  request_shape: [512, 512, 512]
   tile_shape: [128, 128, 128]
   retries: 5
   backoff_seconds: 2.0

@@ -53,6 +53,7 @@ class PipelineConfig:
     run_root: Path
     result_root: Path
     token_file: Path | None
+    request_shape: tuple[int, int, int]
     tile_shape: tuple[int, int, int]
     retries: int
     backoff_seconds: float
@@ -157,8 +158,14 @@ class PipelineConfig:
             raise ValueError("isotropic1024coarse must use the complete 1024^3 grid")
         if any(n % tile != 0 for n, tile in zip(self.grid_shape, self.tile_shape)):
             raise ValueError("tile_shape must divide grid_shape exactly")
+        if any(n % size != 0 for n, size in zip(self.grid_shape, self.request_shape)):
+            raise ValueError("request_shape must divide grid_shape exactly")
+        if any(size % tile != 0 for size, tile in zip(self.request_shape, self.tile_shape)):
+            raise ValueError("request_shape must be an integer multiple of tile_shape")
         if self.tile_shape != (128, 128, 128):
-            raise ValueError("the first SciServer implementation requires 128^3 tiles")
+            raise ValueError("the SciServer store requires 128^3 checksum tiles")
+        if self.request_shape != (512, 512, 512):
+            raise ValueError("the SciServer backend requires 512^3 request blocks")
         if self.retries < 1 or self.backoff_seconds < 0 or self.request_cooldown_seconds < 0:
             raise ValueError("JHTDB retry settings are invalid")
         if not 0 <= self.compression_level <= 9:
@@ -204,7 +211,7 @@ def load_config(path: str | Path) -> PipelineConfig:
     physics = _mapping(data.get("physics"), "physics")
     _reject_unknown(platform, {"state_root", "run_root", "result_root", "scratch_retention_hours"}, "platform")
     _reject_unknown(auth, {"token_file"}, "auth")
-    _reject_unknown(jhtdb, {"tile_shape", "retries", "backoff_seconds", "request_cooldown_seconds"}, "jhtdb")
+    _reject_unknown(jhtdb, {"request_shape", "tile_shape", "retries", "backoff_seconds", "request_cooldown_seconds"}, "jhtdb")
     _reject_unknown(storage, {"compression_level", "compression_threads", "persistent_capacity_gb_observed", "persistent_safety_reserve_gib", "scratch_safety_reserve_gib"}, "storage")
     _reject_unknown(validation, {"divergence_relative_rms_max", "divergence_relative_max_max"}, "validation")
     _reject_unknown(physics, {"sigma_grid", "crop_start", "crop_shape", "epsilon_abs", "epsilon_rel", "fft_workers", "fft_slab_width", "cleanup_scratch_on_success"}, "physics")
@@ -220,6 +227,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         run_root=_path(platform.get("run_root", ""), "platform.run_root"),
         result_root=_path(platform.get("result_root", ""), "platform.result_root"),
         token_file=_path(token_value, "auth.token_file") if token_value else None,
+        request_shape=_tuple3(jhtdb.get("request_shape", [512, 512, 512]), "jhtdb.request_shape"),
         tile_shape=_tuple3(jhtdb.get("tile_shape", [128, 128, 128]), "jhtdb.tile_shape"),
         retries=int(jhtdb.get("retries", 5)),
         backoff_seconds=float(jhtdb.get("backoff_seconds", 2.0)),

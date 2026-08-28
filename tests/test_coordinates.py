@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from jhtdb_pipeline.jhtdb import canonicalize_cutout
+from jhtdb_pipeline.jhtdb import canonicalize_cutout, chunk_from_request
 from jhtdb_pipeline.planning import Tile, coordinate_for_index
 
 
@@ -29,6 +29,23 @@ class CoordinateTests(unittest.TestCase):
                             canonical[component, z, y, x],
                             1000 * component + 100 * z + 10 * y + x,
                         )
+
+    def test_large_request_splits_into_exact_checksum_tiles(self):
+        request = Tile(128, 256, 384, 8, 8, 8)
+        values = np.arange(3 * 8 * 8 * 8, dtype=np.float32).reshape(3, 8, 8, 8)
+        rebuilt = np.empty_like(values)
+        for z in (384, 388):
+            for y in (256, 260):
+                for x in (128, 132):
+                    tile = Tile(x, y, z, 4, 4, 4)
+                    chunk = chunk_from_request(values, request, tile)
+                    rebuilt[
+                        :,
+                        z - request.z0 : z - request.z0 + 4,
+                        y - request.y0 : y - request.y0 + 4,
+                        x - request.x0 : x - request.x0 + 4,
+                    ] = chunk
+        np.testing.assert_array_equal(rebuilt, values)
 
     def test_periodic_coordinates_do_not_duplicate_endpoint(self):
         length = 2.0 * np.pi
