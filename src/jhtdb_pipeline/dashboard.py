@@ -175,7 +175,9 @@ def main() -> None:
         f"{selected} | frame={result.attrs['time_index']} | "
         f"sigma={result.attrs['sigma_grid']}"
     )
-    page = st.sidebar.radio("页面", ("速度对比", "梯度对比", "Work 与 regime", "QA"))
+    page = st.sidebar.radio(
+        "页面", ("速度对比", "梯度对比", "Work 与 regime", "Π 与 S̄", "QA")
+    )
     axis = st.sidebar.selectbox("切片法向", ("z", "y", "x"))
     index = st.sidebar.slider("中心域切片 index", 0, result["work_full"].shape[0] - 1, result["work_full"].shape[0] // 2)
 
@@ -238,6 +240,29 @@ def main() -> None:
         right.plotly_chart(_continuous_figure(resolved, "work_resolved"), use_container_width=True)
         st.plotly_chart(_regime_figure(codes, "regime"), use_container_width=True)
         st.json(dict(result.attrs.get("occupancy", {})))
+    elif page == "Π 与 S̄":
+        if "pi" not in result or "s_bar" not in result:
+            st.warning("该旧版结果不包含 pi/s_bar；需要用新版物理流水线重新计算。")
+        else:
+            pi = extract_scalar_slice(result["pi"], axis, index)
+            s_bar = extract_scalar_slice(result["s_bar"], axis, index)
+            limit = _symmetric_color_limit(np.stack((pi, s_bar)), 99.0)
+            left, right = st.columns(2)
+            left.plotly_chart(
+                _continuous_figure(pi, "Π = τᵢⱼ ∂ⱼūᵢ", color_limit=limit),
+                use_container_width=True,
+            )
+            right.plotly_chart(
+                _continuous_figure(
+                    s_bar, "S̄ = ∂ⱼ(ūᵢτᵢⱼ)", color_limit=limit
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                "式 (2) 符号约定：W_full = W_resolved − Π + S̄；"
+                "常见 LES 定义 Π_conventional = −τ:S = −Π。"
+            )
+            st.json(dict(result.attrs.get("decomposition", {})))
     else:
         for filename in ("manifest.json", "qa.json", "divergence.json", "COMPLETE"):
             path = selected / filename

@@ -32,7 +32,7 @@ validation:
   divergence_relative_max_max: 1.0e-3
 
 physics:
-  sigma_grid: 1.0
+  sigma_grid: [1.0, 2.0, 3.0]
   crop_start: [256, 256, 256]
   crop_shape: [512, 512, 512]
   epsilon_abs: 0.0

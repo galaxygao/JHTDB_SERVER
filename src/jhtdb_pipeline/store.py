@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -9,7 +10,7 @@ import zarr
 from numcodecs import Blosc
 from numcodecs import blosc
 
-from .config import PipelineConfig
+from .config import PipelineConfig, result_zarr_name
 from .planning import Tile
 
 
@@ -93,7 +94,7 @@ def create_result_group(
 ):
     staging = cfg.staging_result_path(time_index, sigma_grid)
     staging.mkdir(parents=True, exist_ok=True)
-    path = staging / "center_result.zarr"
+    path = staging / result_zarr_name(sigma_grid)
     root = zarr.open_group(str(path), mode="w" if overwrite else "a")
     nz, ny, nx = cfg.result_shape_zyx
     cz, cy, cx = (min(64, nz), min(64, ny), min(64, nx))
@@ -131,7 +132,7 @@ def create_result_group(
         "gradient_bar", shape=(3, 3, nz, ny, nx), chunks=(1, 1, cz, cy, cx),
         dtype="<f4", compressor=codec, fill_value=np.nan,
     )
-    for name in ("work_full", "work_resolved"):
+    for name in ("work_full", "work_resolved", "pi", "s_bar"):
         root.require_dataset(
             name, shape=(nz, ny, nx), chunks=(cz, cy, cx),
             dtype="<f4", compressor=codec, fill_value=np.nan,
@@ -177,7 +178,16 @@ def hash_zarr_array(array: Any) -> tuple[str, int, float, float]:
 def open_complete_result(path: Path):
     if not (path / "COMPLETE").is_file():
         raise RuntimeError(f"result is not complete: {path}")
-    root = zarr.open_group(str(path / "center_result.zarr"), mode="r")
+    manifest_path = path / "manifest.json"
+    zarr_path = path / "center_result.zarr"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        sigma_grid = manifest.get("sigma_grid")
+        if sigma_grid is not None:
+            named_path = path / result_zarr_name(float(sigma_grid))
+            if named_path.is_dir():
+                zarr_path = named_path
+    root = zarr.open_group(str(zarr_path), mode="r")
     if root.attrs.get("status") != "complete":
         raise RuntimeError(f"result metadata is incomplete: {path}")
     return root

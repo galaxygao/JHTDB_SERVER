@@ -77,6 +77,22 @@ class ComponentView:
         self.parent[(self.component,) + key] = value
 
 
+class ProductView:
+    """Read-only slab view of the pointwise product of two full-domain fields."""
+
+    def __init__(self, left: Any, right: Any):
+        if tuple(left.shape) != tuple(right.shape):
+            raise ValueError("product fields must have identical shapes")
+        self.left = left
+        self.right = right
+        self.shape = tuple(left.shape)
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        return np.asarray(self.left[key], dtype=np.float32) * np.asarray(
+            self.right[key], dtype=np.float32
+        )
+
+
 def axis_batches(
     shape: tuple[int, int, int], axis: int, slab: int
 ) -> Iterator[tuple[slice, slice, slice]]:
@@ -178,6 +194,21 @@ def accumulate_product(
         key = (slice(start, min(start + slab, destination.shape[0])), slice(None), slice(None))
         values = np.asarray(destination[key], dtype=np.float32)
         values += np.asarray(left[key], dtype=np.float32) * np.asarray(
+            right[key], dtype=np.float32
+        )
+        destination[key] = values
+
+
+def subtract_product(
+    destination: Any,
+    left: Any,
+    right: Any,
+    slab: int,
+) -> None:
+    for start in range(0, destination.shape[0], slab):
+        key = (slice(start, min(start + slab, destination.shape[0])), slice(None), slice(None))
+        values = np.asarray(destination[key], dtype=np.float32)
+        values -= np.asarray(left[key], dtype=np.float32) * np.asarray(
             right[key], dtype=np.float32
         )
         destination[key] = values

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+
+
+RESULT_SCHEMA_VERSION = 2
 
 
 def _tuple3(value: Any, name: str) -> tuple[int, int, int]:
@@ -42,6 +46,24 @@ def sigma_tag(value: float) -> str:
     return format(float(value), ".8g").replace("-", "m").replace(".", "p")
 
 
+def result_zarr_name(sigma_grid: float) -> str:
+    return f"center_result_sigma_{sigma_tag(sigma_grid)}.zarr"
+
+
+def _sigma_values(value: Any) -> tuple[float, ...]:
+    items = value if isinstance(value, (list, tuple)) else (value,)
+    if not items:
+        raise ValueError("physics.sigma_grid must contain at least one value")
+    result = tuple(float(item) for item in items)
+    if any(not math.isfinite(item) or item <= 0 for item in result):
+        raise ValueError("physics.sigma_grid values must be finite and positive")
+    if len(set(result)) != len(result):
+        raise ValueError("physics.sigma_grid values must be unique")
+    if len({sigma_tag(item) for item in result}) != len(result):
+        raise ValueError("physics.sigma_grid values must have unique result tags")
+    return result
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     dataset: str
@@ -74,6 +96,7 @@ class PipelineConfig:
     fft_workers: int
     fft_slab_width: int
     cleanup_scratch_on_success: bool
+    sigma_grids: tuple[float, ...]
 
     @property
     def catalog_path(self) -> Path:
@@ -135,7 +158,7 @@ class PipelineConfig:
     @property
     def result_uncompressed_bytes(self) -> int:
         points = int(self.crop_shape[0] * self.crop_shape[1] * self.crop_shape[2])
-        return points * (3 + 9 + 3 + 9 + 1 + 1) * 4 + points
+        return points * (3 + 9 + 3 + 9 + 1 + 1 + 1 + 1) * 4 + points
 
     def physical_time(self, time_index: int) -> float:
         if time_index < 1:
@@ -145,9 +168,10 @@ class PipelineConfig:
     def with_sigma(self, sigma_grid: float) -> "PipelineConfig":
         from dataclasses import replace
 
-        if sigma_grid <= 0:
+        if not math.isfinite(sigma_grid) or sigma_grid <= 0:
             raise ValueError("sigma_grid must be positive")
-        return replace(self, sigma_grid=float(sigma_grid))
+        sigma = float(sigma_grid)
+        return replace(self, sigma_grid=sigma, sigma_grids=(sigma,))
 
     def validate(self) -> None:
         if self.dataset != "isotropic1024coarse":
@@ -185,7 +209,15 @@ class PipelineConfig:
             raise ValueError("the production crop must be [256:768)^3")
         if self.divergence_relative_rms_max <= 0 or self.divergence_relative_max_max <= 0:
             raise ValueError("divergence tolerances must be positive")
-        if self.sigma_grid <= 0 or self.epsilon_abs < 0 or self.epsilon_rel < 0:
+        if (
+            not self.sigma_grids
+            or self.sigma_grid != self.sigma_grids[0]
+            or any(not math.isfinite(item) or item <= 0 for item in self.sigma_grids)
+            or len(set(self.sigma_grids)) != len(self.sigma_grids)
+            or len({sigma_tag(item) for item in self.sigma_grids}) != len(self.sigma_grids)
+            or self.epsilon_abs < 0
+            or self.epsilon_rel < 0
+        ):
             raise ValueError("physics parameters are invalid")
         if self.fft_workers < 1 or self.fft_slab_width < 1:
             raise ValueError("fft_workers and fft_slab_width must be positive")
@@ -217,6 +249,7 @@ def load_config(path: str | Path) -> PipelineConfig:
     _reject_unknown(physics, {"sigma_grid", "crop_start", "crop_shape", "epsilon_abs", "epsilon_rel", "fft_workers", "fft_slab_width", "cleanup_scratch_on_success"}, "physics")
 
     token_value = auth.get("token_file")
+    sigma_grids = _sigma_values(physics.get("sigma_grid", 1.0))
     cfg = PipelineConfig(
         dataset=str(data.get("dataset", "isotropic1024coarse")),
         variable=str(data.get("variable", "velocity")),
@@ -242,12 +275,13 @@ def load_config(path: str | Path) -> PipelineConfig:
         crop_shape=_tuple3(physics.get("crop_shape", [512, 512, 512]), "physics.crop_shape"),
         divergence_relative_rms_max=float(validation.get("divergence_relative_rms_max", 1.0e-4)),
         divergence_relative_max_max=float(validation.get("divergence_relative_max_max", 1.0e-3)),
-        sigma_grid=float(physics.get("sigma_grid", 1.0)),
+        sigma_grid=sigma_grids[0],
         epsilon_abs=float(physics.get("epsilon_abs", 0.0)),
         epsilon_rel=float(physics.get("epsilon_rel", 0.001)),
         fft_workers=int(physics.get("fft_workers", 16)),
         fft_slab_width=int(physics.get("fft_slab_width", 32)),
         cleanup_scratch_on_success=bool(physics.get("cleanup_scratch_on_success", True)),
+        sigma_grids=sigma_grids,
     )
     cfg.validate()
     return cfg

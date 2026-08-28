@@ -4,7 +4,7 @@
 
 ## 1. 当前实现状态
 
-单帧、单滤波尺度流程已经实现。当前入口只接受 `single-frame`；多尺度 job 要等首帧验收后另行实现，不能使用尚不存在的 `multi-scale` 命令。
+单帧、多滤波尺度顺序批处理流程已经实现。当前入口仍使用 `single-frame`；它读取配置中的 sigma 列表，不存在单独的 `multi-scale` 命令。
 
 2026-08-28，账户 `gaoxingqun` 的 Quotas 页面显示：
 
@@ -108,7 +108,7 @@ persistent 用于：
 - `results/.staging` 中尚未正式提交的中心结果；
 - `results/<result_id>` 中带 `COMPLETE` 的权威结果。
 
-persistent 不保存完整 `1024^3` 速度缓存或全域 FFT 工作场。单尺度中心正式结果未压缩约 13.125 GiB，配置另保留至少 15 GiB 安全余量。
+persistent 不保存完整 `1024^3` 速度缓存或全域 FFT 工作场。单尺度中心正式结果未压缩约 14.125 GiB，配置另保留至少 15 GiB 安全余量。
 
 ### 3.7 scratch / Temporary
 
@@ -131,8 +131,8 @@ scratch 保存：
 | 内容 | 未压缩规模 |
 |---|---:|
 | 完整速度缓存 | 12 GiB |
-| 谱计算 workspace | 28 GiB |
-| scratch 峰值 | 约 40 GiB，另加 16 GiB 安全余量 |
+| 谱计算 workspace | 40 GiB |
+| scratch 峰值 | 约 52 GiB，另加 16 GiB 安全余量 |
 
 ### 3.8 persistent 正式结果
 
@@ -142,7 +142,7 @@ scratch 保存：
 results/
 ├── .staging/<result_id>/
 └── <result_id>/
-    ├── center_result.zarr/
+    ├── center_result_sigma_<sigma_tag>.zarr/
     ├── divergence.json
     ├── qa.json
     ├── manifest.json
@@ -174,6 +174,8 @@ JHTDB velocity
 - `velocity_bar`：滤波中心速度；
 - `gradient_bar`：滤波中心速度梯度；
 - `work_full`、`work_resolved`；
+- `pi = tau_ij ∂_j velocity_bar_i`；
+- `s_bar = ∂_j(velocity_bar_i tau_ij)`；
 - `regime`。
 
 JHTDB request block、checksum tile 和 Zarr chunk 都是服务器内部的读写单位，不是下载分卷。项目不生成归档包或传输分卷。
@@ -213,7 +215,7 @@ storage:
   scratch_safety_reserve_gib: 16
 
 physics:
-  sigma_grid: 1.0
+  sigma_grid: [1.0, 2.0, 3.0]
   crop_start: [256, 256, 256]
   crop_shape: [512, 512, 512]
   fft_workers: 16
@@ -222,7 +224,7 @@ physics:
 
 配置解析器拒绝未知字段，避免拼写错误被静默忽略。`persistent_capacity_gb_observed` 是 Quotas 页面观测值，不代表程序能通过文件系统调用读取账户硬配额。
 
-JHTDB 请求仍严格串行；`fft_workers` 只并行容器内的 FFT。`fft_slab_width: 32` 使单个 FFT 输入块约为 128 MiB，配合 16 个 FFT workers 和 8 个 Blosc 压缩线程使用多核资源，同时继续把约 28 GiB 中间场存入 scratch memmap。
+JHTDB 请求仍严格串行；`fft_workers` 只并行容器内的 FFT。`fft_slab_width: 32` 使单个 FFT 输入块约为 128 MiB，配合 16 个 FFT workers 和 8 个 Blosc 压缩线程使用多核资源，同时继续把约 40 GiB 中间场存入 scratch memmap。
 
 ## 6. 首次建立环境
 
@@ -290,7 +292,7 @@ python -m jhtdb_pipeline smoke --time-index 1 --config configs/pipeline.yaml
 命令为：
 
 ```bash
-bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
+bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1'
 ```
 
 脚本会执行：
@@ -309,7 +311,7 @@ doctor → cache/validate-input → process-center → finalize-result
 
 - 已验证的 `128^3` tile 会回读 SHA-256 后跳过；某个 `512^3` request 仍有缺块时只重新请求该大块；
 - 谱处理若中断，会清理同一 result 的旧 staging/workspace 并从处理阶段开头重算；
-- 已存在且带 `COMPLETE` 的相同 `time_index + sigma_grid` 结果不会被覆盖；
+- 已存在且带 `COMPLETE` 的相同 `time_index + sigma_grid` 当前结果不会被覆盖；缺少 `pi/s_bar` 的旧结果会在新版 staging 完成并通过校验后被替换；
 - 失败的 staging 不会出现在 GUI 正式结果列表中。
 
 查看状态：
@@ -332,7 +334,7 @@ python -m jhtdb_pipeline status --config configs/pipeline.yaml
 | `validate-input --time-index N` | 重新验证完整输入缓存 |
 | `process-center --time-index N --sigma-grid S` | 全域谱处理并写 persistent staging |
 | `finalize-result --time-index N --sigma-grid S` | 校验 staging 并提交正式结果 |
-| `single-frame --time-index N --sigma-grid S` | 串联当前完整流程 |
+| `single-frame --time-index N [--sigma-grid S]` | 串联完整流程；默认批量处理配置列表，指定参数时只跑一个尺度 |
 | `status` | 列出输入和正式/非正式结果状态 |
 | `gui` | 启动只读服务器 GUI |
 
@@ -346,7 +348,7 @@ source .venv/bin/activate
 python -m jhtdb_pipeline gui --config configs/pipeline.yaml --port 8501
 ```
 
-它监听 `0.0.0.0:8501`，只读取 `persistent/results` 中带 `COMPLETE` 的正式 Zarr，并按需载入二维切片。支持 raw/filtered velocity、raw/filtered gradient、work、regime、QA 和 manifest。
+它监听 `0.0.0.0:8501`，只读取 `persistent/results` 中带 `COMPLETE` 的正式 Zarr，并按需载入二维切片。支持 raw/filtered velocity、raw/filtered gradient、work、`pi`、`s_bar`、regime、QA 和 manifest。
 
 需要通过当前 SciServer compute domain 提供的端口入口打开。若该 domain 不提供 Streamlit 端口代理，当前 CLI 不会自动建立 Jupyter 内嵌 viewer；应先补充服务器端 viewer，而不是把数据下载到本地。
 
@@ -365,8 +367,8 @@ python -m jhtdb_pipeline gui --config configs/pipeline.yaml --port 8501
 
 ## 13. 当前边界
 
-- 当前只实现一帧、一个 `sigma_grid` 的正式 job；
-- 当前不实现多尺度共享公共字段；
+- 当前一个正式 job 处理一帧，并顺序计算配置中的多个 `sigma_grid`；
+- 多个尺度共享输入速度缓存，但当前不共享正式结果中的公共字段；
 - 当前不实现本地下载、归档、传输分卷或本地 GUI；
 - 当前不创建自定义 container image；
 - 真实 `1024^3` 首帧尚需在 SciServer 上完成 `doctor`、离线测试和 `smoke` 后再提交。

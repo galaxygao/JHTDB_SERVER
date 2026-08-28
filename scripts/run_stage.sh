@@ -7,6 +7,7 @@ CONFIG_PATH="${JHTDB_PIPELINE_CONFIG:-$PROJECT_ROOT/configs/pipeline.yaml}"
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: run_stage.sh single-frame --time-index N [--sigma-grid S]" >&2
+  echo "Without --sigma-grid, all physics.sigma_grid values are processed in order." >&2
   exit 2
 fi
 

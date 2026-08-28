@@ -25,6 +25,14 @@ class PlanningTests(unittest.TestCase):
         self.assertTrue(result["strictly_serial"])
         self.assertEqual(result["requests_if_no_retry"], 8)
         self.assertEqual(result["checksum_tiles"], 512)
+        self.assertEqual(result["sigma_grids"], [1.0, 2.0, 3.0])
+        self.assertEqual(
+            [
+                path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                for path in result["persistent_result_paths"]
+            ],
+            ["t000003_sigma_1", "t000003_sigma_2", "t000003_sigma_3"],
+        )
 
     def test_eight_requests_each_contain_64_checksum_tiles(self):
         tiles = tiles_for(self.cfg)

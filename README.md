@@ -17,7 +17,7 @@ SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERV
 - 在服务器上直接查看正式结果，不下载结果归档到本地；
 - 对下载、坐标、物理计算、输出提交和 token 使用建立可审计的验证链。
 
-当前版本只执行单帧、单滤波尺度。多尺度任务将在首帧验收后单独实现。
+当前版本一次执行一帧，并可按配置顺序批量计算多个滤波尺度。各尺度复用同一份已验证速度缓存，分别生成独立正式结果。
 
 ### 1.2 主要功能
 
@@ -71,7 +71,7 @@ scratch 只保存可重建的完整速度缓存、FFT memmap 和临时工作区�
 G(θ) = exp[-0.5 × (sigma_grid × θ)^2]
 ```
 
-默认 `sigma_grid=1.0` 表示标准差为 1 个网格间距。代码没有使用有限长度的离散高斯核；如果采用“与 top-hat 二阶矩等效”的宽度约定，则 `Δ_eff = √12 σ ≈ 3.464` 个网格间距。命令行和结果目录记录的仍然是 `sigma_grid`，不是 `Δ_eff`。
+例如 `sigma_grid=1.0` 表示标准差为 1 个网格间距。当前配置列表 `[1.0,2.0,3.0]` 会依次产生三个独立尺度结果。代码没有使用有限长度的离散高斯核；如果采用“与 top-hat 二阶矩等效”的宽度约定，则 `sigma_grid=1.0` 对应 `Δ_eff = √12 σ ≈ 3.464` 个网格间距。命令行和结果目录记录的仍然是 `sigma_grid`，不是 `Δ_eff`。
 
 当前 work 的代码定义为：
 
@@ -79,6 +79,17 @@ G(θ) = exp[-0.5 × (sigma_grid × θ)^2]
 work_full     = Σ_i ū_i × overline[(u_j ∂_j u_i)]
 work_resolved = Σ_i ū_i × (ū_j ∂_j ū_i)
 ```
+
+按照 project description 的式 (1)–(2)，另保存：
+
+```text
+tau_ij = overline(u_i u_j) - ū_i ū_j
+pi     = Σ_ij tau_ij × ∂_j ū_i
+s_bar  = Σ_j ∂_j(Σ_i ū_i tau_ij)
+work_full = work_resolved - pi + s_bar
+```
+
+这里的 `pi` 严格采用式 (2) 的符号约定。常见 LES 文献定义的正向能量通量 `Pi_conventional = -tau_ij S_ij`，在不可压缩且应力对称时等于这里的 `-pi`。QA 会记录上述 work 分解的逐点残差 RMS 和最大绝对值。
 
 `regime` 根据两种 work 相对于各自阈值的正负组合编码为 uncertain、Q1、Q2、Q3、Q4。
 
@@ -143,7 +154,7 @@ token：
 | storage | `compression_threads` | 8 个压缩线程 |
 | storage | safety reserve | persistent 15 GiB、scratch 16 GiB |
 | validation | divergence thresholds | 相对 RMS `1e-4`、相对最大值 `1e-3` |
-| physics | `sigma_grid` | 默认高斯标准差 1 个网格间距 |
+| physics | `sigma_grid` | 高斯标准差列表；默认生产配置为 `[1.0,2.0,3.0]` 个网格间距 |
 | physics | `crop_start`, `crop_shape` | `[256,256,256]`, `[512,512,512]` |
 | physics | `epsilon_abs`, `epsilon_rel` | regime 不确定区阈值参数 |
 | physics | `fft_workers` | 16 个 SciPy FFT worker |
@@ -223,7 +234,7 @@ python -m jhtdb_pipeline smoke --time-index 1 --config configs/pipeline.yaml
 在 SciServer Jobs 页面选择与 Interactive container 相同的 image 和挂载卷，提交：
 
 ```bash
-bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
+bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1'
 ```
 
 完整执行顺序：
@@ -238,7 +249,9 @@ doctor → cache → validate-input → process-center → finalize-result
 state/logs/single-frame_<UTC timestamp>.log
 ```
 
-相同 `time-index` 和 `sigma-grid` 的完整正式结果已经存在时，命令会复用它而不是覆盖。未完成的输入缓存可断点续跑；`process-center` 的 FFT 工作区中断后会从该计算阶段重新建立。
+省略 `--sigma-grid` 时，命令依次计算配置中的全部 `physics.sigma_grid`；提供该参数时只计算指定尺度。相同 `time-index` 和 `sigma-grid` 的当前完整结果已经存在时，命令会复用它。缺少 `pi/s_bar` 的旧结果会保留到新版 staging 完整计算并通过字段校验，随后由新版结果替换。未完成的输入缓存可断点续跑；`process-center` 的 FFT 工作区中断后会从该计算阶段重新建立。
+
+尺度采用顺序批处理，不会同时启动多个约 52 GiB scratch 峰值的 FFT 流程。当前每个尺度的正式结果未压缩约 14.125 GiB，`plan` 会同时报告单尺度和整个配置列表的容量计划。
 
 ### 2.8 分阶段运行、排错与状态
 
@@ -273,7 +286,7 @@ CLI 命令汇总：
 | `validate-input` | 否 | 完整输入缓存验证 |
 | `process-center` | 否 | 全域谱计算并写 staging |
 | `finalize-result` | 否 | 字段级验证并提交正式结果 |
-| `single-frame` | 是 | 串联完整单帧流程 |
+| `single-frame` | 是 | 串联完整单帧流程，并顺序批量处理配置的滤波尺度 |
 | `status` | 否 | 输入缓存和正式结果状态 |
 | `gui` | 否 | 启动只读服务器 GUI |
 
@@ -295,10 +308,11 @@ GUI 监听 `0.0.0.0:8501`，支持：
 - 9 个 `gradient` 与 `gradient_bar` 分量对比；
 - 梯度线性或 SymLog 色标和显示分位数；
 - `work_full`、`work_resolved` 和 `regime`；
+- 式 (2) 的 `pi`、`s_bar` 同色标切片及 work 分解残差；
 - QA、manifest、散度报告和 `COMPLETE`；
 - `x/y/z` 法向与切片 index 选择。
 
-GUI 每次只从 Zarr 读取选中的二维切片，不把整个约 13 GiB 结果载入内存。浏览器只接收当前页面需要的可视化数据，不生成或下载结果归档。按 `Ctrl+C` 只停止 GUI，不影响另一个 Terminal 或 Compute Job 中的计算。
+GUI 每次只从 Zarr 读取选中的二维切片，不把整个约 14 GiB 结果载入内存。浏览器只接收当前页面需要的可视化数据，不生成或下载结果归档。按 `Ctrl+C` 只停止 GUI，不影响另一个 Terminal 或 Compute Job 中的计算。
 
 需要通过当前 SciServer compute domain 提供的端口入口访问。若该 domain 不提供 Streamlit 端口代理，当前版本不会回退到本地 GUI；应增加服务器端 Jupyter 内嵌 viewer。
 
@@ -453,7 +467,7 @@ python -m unittest discover -s tests -v
 - staging 到正式目录的同文件系统原子 rename；
 - 最后创建包含 manifest hash 的 `COMPLETE`。
 
-正式目录已存在时拒绝覆盖。GUI 也要求目录具有 `COMPLETE` 且 Zarr attrs 的状态为 `complete`，因此不会把部分写入结果当成正式数据。
+当前 schema 的正式目录已存在时拒绝覆盖。缺少 `pi/s_bar` 的旧 schema 结果只会在新版 staging 完成全部校验后被替换。GUI 也要求目录具有 `COMPLETE` 且 Zarr attrs 的状态为 `complete`，因此不会把部分写入结果当成正式数据。
 
 Review 正式结果时执行：
 
@@ -468,7 +482,7 @@ COMPLETE
 manifest.json
 qa.json
 divergence.json
-center_result.zarr/
+center_result_sigma_<sigma_tag>.zarr/
 ```
 
 ### 4.5 安全性检测
@@ -480,7 +494,7 @@ center_result.zarr/
 - 配置加载器拒绝未知字段和不符合生产约束的 shape/path/阈值；
 - 处理锁防止同一计算工作区被并发写入；
 - 删除临时工作区前验证目标位于预期 scratch 父目录；
-- persistent 提交不覆盖已有正式结果；
+- persistent 提交不覆盖当前 schema 的正式结果；旧 schema 只在新版校验完成后替换；
 - GUI 以只读模式打开 Zarr，不提供上传、编辑或删除操作；
 - `doctor` 在正式任务前检查 persistent/scratch 写权限、空间余量和 scratch 到期状态。
 
@@ -508,7 +522,7 @@ JHTDB_RUNS/t000001/
 └── work_sigma_1/             # FFT memmap 与工作缓冲，成功后自动清理
 ```
 
-资源计划按完整速度缓存约 12 GiB、workspace 约 28 GiB、scratch 峰值约 40 GiB 估算。scratch 是可重建数据，不是正式结果记录。
+资源计划按完整速度缓存约 12 GiB、workspace 约 40 GiB、scratch 峰值约 52 GiB 估算。新增的 12 GiB 是三个全域 SGS transport 分量，用于直接计算 `s_bar` 的散度。scratch 是可重建数据，不是正式结果记录。
 
 ### 5.2 persistent 正式结果
 
@@ -516,7 +530,7 @@ JHTDB_RUNS/t000001/
 
 ```text
 results/t000001_sigma_1/
-├── center_result.zarr/
+├── center_result_sigma_1.zarr/
 ├── manifest.json
 ├── qa.json
 ├── divergence.json
@@ -533,9 +547,11 @@ results/t000001_sigma_1/
 | `gradient_bar` | `(3,3,512,512,512)` | `float32` | 4.5 GiB |
 | `work_full` | `(512,512,512)` | `float32` | 0.5 GiB |
 | `work_resolved` | `(512,512,512)` | `float32` | 0.5 GiB |
+| `pi` | `(512,512,512)` | `float32` | 0.5 GiB |
+| `s_bar` | `(512,512,512)` | `float32` | 0.5 GiB |
 | `regime` | `(512,512,512)` | `uint8` | 0.125 GiB |
 
-单尺度未压缩合计约 13.125 GiB，另有 Zarr metadata 和文件系统开销。正式结果不打包、不分卷、不自动下载。
+单尺度未压缩合计约 14.125 GiB，另有 Zarr metadata 和文件系统开销。正式结果不打包、不分卷、不自动下载。
 
 ## 6. 失败恢复与当前边界
 
@@ -557,7 +573,7 @@ results/t000001_sigma_1/
 - 只支持单帧、单尺度正式任务；
 - JHTDB 同一时刻严格限制为一个请求在途；
 - 不实现本地下载、归档、结果分卷或本地 GUI；
-- 多尺度版本需要复用公共 `velocity`/`gradient` 并在提交前重新计算 persistent 容量。
+- 批量尺度当前共享输入速度缓存，但每个尺度仍独立计算并保存完整结果；后续可进一步共享未滤波公共字段以减少计算和 persistent 占用。
 
 ## 7. 官方资料
 

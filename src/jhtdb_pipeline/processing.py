@@ -12,14 +12,16 @@ from filelock import FileLock
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from .config import PipelineConfig
+from .config import RESULT_SCHEMA_VERSION, PipelineConfig, result_zarr_name
 from .physics import (
     ComponentView,
+    ProductView,
     accumulate_product,
     close_memmap,
     derivative_field,
     filter_field,
     memmap,
+    subtract_product,
     zero_field,
 )
 from .store import create_result_group, hash_zarr_array
@@ -33,8 +35,27 @@ RESULT_FIELDS = {
     "gradient_bar": ("<f4", 5),
     "work_full": ("<f4", 3),
     "work_resolved": ("<f4", 3),
+    "pi": ("<f4", 3),
+    "s_bar": ("<f4", 3),
     "regime": ("u1", 3),
 }
+
+
+def _complete_result_is_current(path: Path, sigma_grid: float) -> bool:
+    if not (path / "COMPLETE").is_file():
+        return False
+    zarr_path = path / result_zarr_name(sigma_grid)
+    if not zarr_path.is_dir():
+        return False
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r")
+        return (
+            root.attrs.get("status") == "complete"
+            and root.attrs.get("result_schema_version") == RESULT_SCHEMA_VERSION
+            and all(name in root for name in RESULT_FIELDS)
+        )
+    except Exception:
+        return False
 
 
 def _safe_rmtree(path: Path, required_parent: Path) -> None:
@@ -107,6 +128,15 @@ def _accumulate_center(
         destination[relative] = current + left * right
 
 
+def _accumulate_crop(cfg: PipelineConfig, destination: Any, source: Any) -> None:
+    shape = cfg.result_shape_zyx
+    chunks = tuple(int(value) for value in destination.chunks)
+    for relative in _spatial_keys(shape, chunks):
+        current = np.asarray(destination[relative], dtype=np.float32)
+        values = np.asarray(source[_source_key(cfg, relative)], dtype=np.float32)
+        destination[relative] = current + values
+
+
 def _field_statistics(field: Any, slab: int) -> tuple[float, float, int]:
     sumsq = 0.0
     maximum = 0.0
@@ -127,13 +157,18 @@ def _field_statistics(field: Any, slab: int) -> tuple[float, float, int]:
 def resource_plan(cfg: PipelineConfig) -> dict[str, float]:
     full_points = int(np.prod(cfg.grid_shape, dtype=np.int64))
     scalar_bytes = full_points * 4
-    # filtered velocity (3) + derivative + acceleration + two filter buffers.
-    workspace_bytes = 7 * scalar_bytes
+    # filtered velocity (3) + SGS transport (3) + derivative + acceleration
+    # + two filter buffers.
+    workspace_bytes = 10 * scalar_bytes
     return {
         "velocity_cache_GiB": cfg.bytes_per_snapshot / 1024**3,
         "workspace_GiB": workspace_bytes / 1024**3,
         "scratch_peak_GiB": (cfg.bytes_per_snapshot + workspace_bytes) / 1024**3,
         "persistent_result_GiB": cfg.result_uncompressed_bytes / 1024**3,
+        "configured_sigma_count": len(cfg.sigma_grids),
+        "persistent_batch_GiB": (
+            len(cfg.sigma_grids) * cfg.result_uncompressed_bytes / 1024**3
+        ),
         "persistent_reserve_GiB": cfg.persistent_safety_reserve_gib,
         "fft_workers": cfg.fft_workers,
         "compression_threads": cfg.compression_threads,
@@ -170,7 +205,7 @@ def _preflight_workspace_space(cfg: PipelineConfig, time_index: int) -> None:
     path.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(path)
     full_points = int(np.prod(cfg.grid_shape, dtype=np.int64))
-    workspace_bytes = 7 * full_points * 4
+    workspace_bytes = 10 * full_points * 4
     required = workspace_bytes + int(cfg.scratch_safety_reserve_gib * 1024**3)
     if usage.free < required:
         raise RuntimeError(
@@ -189,7 +224,7 @@ def process_center(
         raise ValueError("sigma_grid must be positive")
     manifest_hash = input_manifest_hash(cfg, time_index)
     final = cfg.result_path(time_index, sigma)
-    if (final / "COMPLETE").is_file():
+    if _complete_result_is_current(final, sigma):
         return final
     _preflight_result_space(cfg)
     _preflight_workspace_space(cfg, time_index)
@@ -211,7 +246,12 @@ def process_center(
     result.attrs.update(
         {
             "input_manifest_hash": manifest_hash,
-            "algorithm": "center_periodic_spectral_v1",
+            "result_schema_version": RESULT_SCHEMA_VERSION,
+            "algorithm": "center_periodic_spectral_pi_sbar",
+            "pi_definition": "tau_ij * d_j(velocity_bar_i)",
+            "pi_sign_convention": "Equation (2): W_full = W_resolved - pi + s_bar",
+            "s_bar_definition": "d_j(velocity_bar_i * tau_ij)",
+            "tau_definition": "filter(velocity_i * velocity_j) - velocity_bar_i * velocity_bar_j",
         }
     )
 
@@ -221,6 +261,7 @@ def process_center(
     acceleration = memmap(workspace / "acceleration.f32", full_shape)
     temp_a = memmap(workspace / "filter_a.f32", full_shape)
     temp_b = memmap(workspace / "filter_b.f32", full_shape)
+    sgs_transport = memmap(workspace / "sgs_transport.f32", expected)
     cfg.lock_path.mkdir(parents=True, exist_ok=True)
     lock = FileLock(str(cfg.lock_path / "process-center.lock"), timeout=0)
     console = Console()
@@ -236,7 +277,7 @@ def process_center(
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("center spectral pipeline", total=33)
+        task = progress.add_task("center spectral pipeline", total=42)
         for component in range(3):
             _copy_crop(
                 cfg,
@@ -265,6 +306,8 @@ def process_center(
 
         _zero_zarr(result["work_full"])
         _zero_zarr(result["work_resolved"])
+        _zero_zarr(result["pi"])
+        _zero_zarr(result["s_bar"])
 
         for component in range(3):
             zero_field(acceleration, cfg.fft_slab_width)
@@ -350,6 +393,76 @@ def process_center(
             )
             progress.advance(task)
 
+        for component in range(3):
+            zero_field(ComponentView(sgs_transport, component), cfg.fft_slab_width)
+
+        for left_component in range(3):
+            for right_component in range(left_component, 3):
+                filter_field(
+                    ProductView(
+                        ComponentView(raw, left_component),
+                        ComponentView(raw, right_component),
+                    ),
+                    derivative,
+                    temp_a,
+                    temp_b,
+                    sigma,
+                    cfg.fft_slab_width,
+                    workers=cfg.fft_workers,
+                )
+                subtract_product(
+                    derivative,
+                    ComponentView(filtered_velocity, left_component),
+                    ComponentView(filtered_velocity, right_component),
+                    cfg.fft_slab_width,
+                )
+                derivative.flush()
+
+                _accumulate_center(
+                    cfg,
+                    result["pi"],
+                    result["gradient_bar"],
+                    (left_component, right_component),
+                    derivative,
+                )
+                if left_component != right_component:
+                    _accumulate_center(
+                        cfg,
+                        result["pi"],
+                        result["gradient_bar"],
+                        (right_component, left_component),
+                        derivative,
+                    )
+
+                accumulate_product(
+                    ComponentView(sgs_transport, right_component),
+                    ComponentView(filtered_velocity, left_component),
+                    derivative,
+                    cfg.fft_slab_width,
+                )
+                if left_component != right_component:
+                    accumulate_product(
+                        ComponentView(sgs_transport, left_component),
+                        ComponentView(filtered_velocity, right_component),
+                        derivative,
+                        cfg.fft_slab_width,
+                    )
+                progress.advance(task)
+
+        sgs_transport.flush()
+        for derivative_component in range(3):
+            derivative_field(
+                ComponentView(sgs_transport, derivative_component),
+                derivative,
+                derivative_component,
+                cfg.domain_length,
+                cfg.fft_slab_width,
+                workers=cfg.fft_workers,
+            )
+            derivative.flush()
+            _accumulate_crop(cfg, result["s_bar"], derivative)
+            progress.advance(task)
+
         zero_field(acceleration, cfg.fft_slab_width)
         for component in range(3):
             derivative_field(
@@ -374,7 +487,14 @@ def process_center(
     divergence_sumsq, divergence_maximum, point_count = _field_statistics(
         acceleration, cfg.fft_slab_width
     )
-    for mapped in (filtered_velocity, derivative, acceleration, temp_a, temp_b):
+    for mapped in (
+        filtered_velocity,
+        derivative,
+        acceleration,
+        temp_a,
+        temp_b,
+        sgs_transport,
+    ):
         close_memmap(mapped)
     divergence_rms = float(np.sqrt(divergence_sumsq / point_count))
     gradient_rms = float(np.sqrt(gradient_sumsq / gradient_count))
@@ -413,6 +533,26 @@ def process_center(
         full_sumsq += float(np.square(full, dtype=np.float64).sum())
         resolved_sumsq += float(np.square(resolved, dtype=np.float64).sum())
         center_count += full.size
+    decomposition_sumsq = 0.0
+    decomposition_maximum = 0.0
+    for key in _spatial_keys(cfg.result_shape_zyx, work_chunks):
+        full = np.asarray(result["work_full"][key], dtype=np.float32)
+        resolved = np.asarray(result["work_resolved"][key], dtype=np.float32)
+        pi = np.asarray(result["pi"][key], dtype=np.float32)
+        s_bar = np.asarray(result["s_bar"][key], dtype=np.float32)
+        residual = full - (resolved - pi + s_bar)
+        decomposition_sumsq += float(np.square(residual, dtype=np.float64).sum())
+        decomposition_maximum = max(
+            decomposition_maximum, float(np.max(np.abs(residual)))
+        )
+    decomposition_rms = float(np.sqrt(decomposition_sumsq / center_count))
+    full_rms = float(np.sqrt(full_sumsq / center_count))
+    decomposition_report = {
+        "identity": "work_full = work_resolved - pi + s_bar",
+        "residual_rms": decomposition_rms,
+        "residual_maximum_abs": decomposition_maximum,
+        "relative_rms_to_work_full": decomposition_rms / max(full_rms, 1.0e-30),
+    }
     epsilon_full = max(
         cfg.epsilon_abs, cfg.epsilon_rel * np.sqrt(full_sumsq / center_count)
     )
@@ -438,6 +578,7 @@ def process_center(
         "sigma_grid": sigma,
         "input_manifest_hash": manifest_hash,
         "divergence": divergence_report,
+        "decomposition": decomposition_report,
         "epsilon_full": float(epsilon_full),
         "epsilon_resolved": float(epsilon_resolved),
         "occupancy": {
@@ -452,6 +593,7 @@ def process_center(
             "epsilon_full": float(epsilon_full),
             "epsilon_resolved": float(epsilon_resolved),
             "occupancy": qa["occupancy"],
+            "decomposition": decomposition_report,
         }
     )
     return staging
@@ -465,11 +607,11 @@ def finalize_result(
     sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
     staging = cfg.staging_result_path(time_index, sigma)
     final = cfg.result_path(time_index, sigma)
-    if (final / "COMPLETE").is_file():
+    if _complete_result_is_current(final, sigma):
         return final
     if not staging.is_dir():
         raise RuntimeError("persistent result staging directory is missing")
-    root = zarr.open_group(str(staging / "center_result.zarr"), mode="a")
+    root = zarr.open_group(str(staging / result_zarr_name(sigma)), mode="a")
     if root.attrs.get("status") != "processed":
         raise RuntimeError("persistent result staging has not completed processing")
 
@@ -480,6 +622,8 @@ def finalize_result(
         "gradient_bar": (3, 3, *cfg.result_shape_zyx),
         "work_full": cfg.result_shape_zyx,
         "work_resolved": cfg.result_shape_zyx,
+        "pi": cfg.result_shape_zyx,
+        "s_bar": cfg.result_shape_zyx,
         "regime": cfg.result_shape_zyx,
     }
     fields: dict[str, Any] = {}
@@ -503,7 +647,7 @@ def finalize_result(
         }
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": RESULT_SCHEMA_VERSION,
         "status": "complete",
         "dataset": cfg.dataset,
         "time_index": time_index,
@@ -525,7 +669,10 @@ def finalize_result(
     )
 
     if final.exists():
-        raise FileExistsError(f"refusing to replace existing result: {final}")
+        if (final / "COMPLETE").is_file():
+            _safe_rmtree(final, cfg.result_root)
+        else:
+            raise FileExistsError(f"refusing to replace incomplete result: {final}")
     final.parent.mkdir(parents=True, exist_ok=True)
     os.replace(staging, final)
     complete = final / "COMPLETE"

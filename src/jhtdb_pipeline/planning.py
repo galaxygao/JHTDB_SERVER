@@ -106,7 +106,14 @@ def plan(cfg: PipelineConfig, time_index: int) -> dict[str, object]:
         "result_crop_start_xyz": list(cfg.crop_start),
         "result_crop_shape_xyz": list(cfg.crop_shape),
         "result_uncompressed_GiB": round(cfg.result_uncompressed_bytes / 1024**3, 3),
+        "batch_result_uncompressed_GiB": round(
+            len(cfg.sigma_grids) * cfg.result_uncompressed_bytes / 1024**3, 3
+        ),
         "persistent_result_path": str(cfg.result_path(time_index)),
+        "sigma_grids": list(cfg.sigma_grids),
+        "persistent_result_paths": [
+            str(cfg.result_path(time_index, sigma)) for sigma in cfg.sigma_grids
+        ],
         "scratch_run_path": str(cfg.run_path(time_index)),
         "usage_warning": "JHTDB recommends small targeted subsets and discourages crawling multiple full 3-D fields.",
     }

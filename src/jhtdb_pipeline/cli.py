@@ -94,14 +94,29 @@ def _status(cfg) -> dict[str, object]:
     return {"inputs": inputs, "results": results}
 
 
-def _run_single_frame(cfg, time_index: int, sigma_grid: float | None) -> Path:
+def _selected_sigmas(cfg, sigma_grid: float | None) -> tuple[float, ...]:
+    return (float(sigma_grid),) if sigma_grid is not None else cfg.sigma_grids
+
+
+def _run_single_frame(cfg, time_index: int, sigma_grid: float | None) -> list[Path]:
     report = doctor(cfg, time_index)
     if report["status"] != "ok":
         raise RuntimeError(f"SciServer doctor failed: {json.dumps(report['checks'])}")
     fetch_snapshot(cfg, time_index)
     validate_snapshot(cfg, time_index)
-    process_center(cfg, time_index, sigma_grid)
-    return finalize_result(cfg, time_index, sigma_grid)
+    results = []
+    for sigma in _selected_sigmas(cfg, sigma_grid):
+        print(f"batch frame={time_index} sigma_grid={sigma:g}", flush=True)
+        process_center(cfg, time_index, sigma)
+        results.append(finalize_result(cfg, time_index, sigma))
+    return results
+
+
+def _print_paths(paths: list[Path]) -> None:
+    if len(paths) == 1:
+        print(paths[0])
+    else:
+        print(json.dumps([str(path) for path in paths], ensure_ascii=False, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -138,11 +153,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "process-center":
-            print(process_center(cfg, args.time_index, args.sigma_grid))
+            _print_paths(
+                [
+                    process_center(cfg, args.time_index, sigma)
+                    for sigma in _selected_sigmas(cfg, args.sigma_grid)
+                ]
+            )
         elif args.command == "finalize-result":
-            print(finalize_result(cfg, args.time_index, args.sigma_grid))
+            _print_paths(
+                [
+                    finalize_result(cfg, args.time_index, sigma)
+                    for sigma in _selected_sigmas(cfg, args.sigma_grid)
+                ]
+            )
         elif args.command == "single-frame":
-            print(_run_single_frame(cfg, args.time_index, args.sigma_grid))
+            _print_paths(_run_single_frame(cfg, args.time_index, args.sigma_grid))
         elif args.command == "status":
             print(json.dumps(_status(cfg), ensure_ascii=False, indent=2))
         elif args.command == "gui":

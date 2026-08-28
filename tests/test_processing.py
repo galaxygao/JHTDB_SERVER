@@ -7,9 +7,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import zarr
 
 from jhtdb_pipeline.catalog import Catalog
-from jhtdb_pipeline.config import load_config
+from jhtdb_pipeline.config import load_config, result_zarr_name
 from jhtdb_pipeline.physics import spectral_derivative, spectral_gaussian
 from jhtdb_pipeline.planning import Tile
 from jhtdb_pipeline.processing import finalize_result, process_center, resource_plan
@@ -59,9 +60,11 @@ class ProcessingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             cfg, velocity = fixture(Path(temporary))
             plan = resource_plan(cfg)
-            self.assertEqual(plan["persistent_result_GiB"], 512 * 105 / 1024**3)
+            self.assertEqual(plan["persistent_result_GiB"], 512 * 113 / 1024**3)
+            self.assertEqual(plan["configured_sigma_count"], 3)
+            self.assertEqual(plan["persistent_batch_GiB"], 3 * 512 * 113 / 1024**3)
             staging = process_center(cfg, 1)
-            self.assertTrue((staging / "center_result.zarr").is_dir())
+            self.assertTrue((staging / result_zarr_name(cfg.sigma_grid)).is_dir())
             final = finalize_result(cfg, 1)
             self.assertTrue((final / "COMPLETE").is_file())
             self.assertTrue((final / "manifest.json").is_file())
@@ -82,13 +85,65 @@ class ProcessingTests(unittest.TestCase):
             )
             self.assertTrue(np.all(np.isfinite(result["work_full"][:])))
             self.assertTrue(np.all(np.isfinite(result["work_resolved"][:])))
+            filtered = np.stack(
+                [spectral_gaussian(velocity[i], cfg.sigma_grid) for i in range(3)]
+            )
+            gradient_bar = np.empty((3, 3, 16, 16, 16), dtype=np.float32)
+            tau = np.empty((3, 3, 16, 16, 16), dtype=np.float32)
+            for i in range(3):
+                for j in range(3):
+                    gradient_bar[i, j] = spectral_derivative(
+                        filtered[i], 2 - j, cfg.domain_length
+                    )
+                    tau[i, j] = (
+                        spectral_gaussian(velocity[i] * velocity[j], cfg.sigma_grid)
+                        - filtered[i] * filtered[j]
+                    )
+            expected_pi = np.einsum("ijzyx,ijzyx->zyx", tau, gradient_bar)
+            transport = np.einsum("izyx,ijzyx->jzyx", filtered, tau)
+            expected_s_bar = sum(
+                spectral_derivative(transport[j], 2 - j, cfg.domain_length)
+                for j in range(3)
+            )
+            np.testing.assert_allclose(
+                result["pi"][:], expected_pi[crop], rtol=3e-5, atol=3e-6
+            )
+            np.testing.assert_allclose(
+                result["s_bar"][:], expected_s_bar[crop], rtol=3e-5, atol=3e-6
+            )
+            np.testing.assert_allclose(
+                result["work_full"][:],
+                result["work_resolved"][:] - result["pi"][:] + result["s_bar"][:],
+                rtol=5e-5,
+                atol=5e-6,
+            )
             self.assertFalse(cfg.workspace_path(1).exists())
             self.assertFalse(any(final.rglob("*.part-*")))
             manifest = json.loads((final / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(set(manifest["fields"]), {
                 "velocity", "gradient", "velocity_bar", "gradient_bar",
-                "work_full", "work_resolved", "regime",
+                "work_full", "work_resolved", "pi", "s_bar", "regime",
             })
+
+    def test_legacy_complete_result_is_replaced_only_after_new_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg, _ = fixture(Path(temporary))
+            final = cfg.result_path(1)
+            legacy = zarr.open_group(str(final / "center_result.zarr"), mode="w")
+            legacy.attrs["status"] = "complete"
+            (final / "COMPLETE").write_text("{}\n", encoding="utf-8")
+
+            staging = process_center(cfg, 1)
+            self.assertTrue((final / "COMPLETE").is_file())
+            self.assertTrue((final / "center_result.zarr").is_dir())
+            self.assertTrue((staging / result_zarr_name(cfg.sigma_grid)).is_dir())
+
+            replaced = finalize_result(cfg, 1)
+            self.assertEqual(replaced, final)
+            self.assertFalse((final / "center_result.zarr").exists())
+            self.assertTrue((final / result_zarr_name(cfg.sigma_grid)).is_dir())
+            self.assertIn("pi", open_complete_result(final))
 
     def test_divergence_failure_never_creates_complete_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
