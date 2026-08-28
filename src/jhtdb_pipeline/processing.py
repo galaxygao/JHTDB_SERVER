@@ -10,7 +10,7 @@ import numpy as np
 import zarr
 from filelock import FileLock
 from rich.console import Console
-from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from .config import PipelineConfig
 from .physics import (
@@ -229,6 +229,7 @@ def process_center(
     gradient_count = 0
 
     with lock, Progress(
+        SpinnerColumn("line"),
         TextColumn("{task.description}"),
         BarColumn(),
         "{task.completed}/{task.total}",

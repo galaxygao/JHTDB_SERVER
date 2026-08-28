@@ -1,60 +1,529 @@
-# JHTDB SciServer 全周期域流水线
+# JHTDB SciServer 全周期域中心流水线
 
-本项目在 Johns Hopkins SciServer 内完成 `isotropic1024coarse` 单帧速度场获取、全周期域谱计算、中心 `512^3` 裁剪、结果验证和服务器端可视化。科学数据不与本地电脑交互。
+本项目只在 Johns Hopkins SciServer 上运行。它从 JHTDB 获取 `isotropic1024coarse` 的单帧完整速度场，在完整周期域上完成谱导数与谱高斯滤波，只把中心 `512^3` 区域的速度、梯度、功和状态分类保存到 SciServer persistent，并在 Interactive container 中提供只读 GUI。科学数据不下载到本地电脑，也不依赖本地文件系统。
 
-详细的平台结构、容器创建、配置和操作说明见 [`SCISERVER_SYSTEM_GUIDE.md`](SCISERVER_SYSTEM_GUIDE.md)。
+SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERVER_SYSTEM_GUIDE.md`](SCISERVER_SYSTEM_GUIDE.md)。本 README 是项目功能、配置、安装、运行、代码结构和验收标准的主入口。
 
-## 1. 运行架构
+## 1. 项目目的、功能与实现概括
+
+### 1.1 目的
+
+项目解决以下问题：
+
+- 从 JHTDB 可靠地获取一帧完整 `1024^3 × 3` 周期速度场；
+- 避免把完整原始数据和全域派生量长期保存在 persistent；
+- 保证 FFT、谱导数和滤波在完整周期域上进行，避免先裁剪造成边界伪影；
+- 永久保存中心 `512^3` 的未滤波/滤波速度、未滤波/滤波梯度、work 和 regime；
+- 在服务器上直接查看正式结果，不下载结果归档到本地；
+- 对下载、坐标、物理计算、输出提交和 token 使用建立可审计的验证链。
+
+当前版本只执行单帧、单滤波尺度。多尺度任务将在首帧验收后单独实现。
+
+### 1.2 主要功能
+
+- 严格串行的 JHTDB 大块 cutout，并支持断点续跑；
+- scratch 中的完整速度缓存、checksum、manifest 和缓存有效性检查；
+- 完整 `1024^3` 周期域上的谱导数与可分离谱高斯滤波；
+- 中心 `[256:768)^3` 裁剪；
+- 服务器 persistent 中的 Zarr 正式结果；
+- 全域无散度检查、shape/dtype/有限值检查和逐字段 SHA-256；
+- staging 到正式结果的原子提交和 `COMPLETE` 标记；
+- Streamlit + Plotly 只读服务器 GUI，按需读取二维切片。
+
+### 1.3 实现方法概括
 
 ```text
-JHTDB legacy cutout（SciServer Giverny）
-        │ 8 个 512^3 请求，严格串行
+JHTDB isotropic1024coarse
+        │ 8 个 512^3 request，严格串行
         ▼
-scratch：完整 1024^3 × 3 速度缓存
-        │ 全周期域谱导数与谱高斯滤波
+scratch/velocity_cache.zarr
+        │ 每个 request 拆成 64 个 128^3 checksum tile
+        │ 完整性、坐标、回读 SHA-256、周期接缝检查
         ▼
-persistent：results/.staging/<run_id>
-        │ 中心 [256:768)^3 校验
+完整 1024^3 周期域
+        │ FFT 谱导数 + 谱高斯滤波 + work
         ▼
-persistent：results/<run_id> + COMPLETE
+persistent/results/.staging/<result_id>
+        │ 只写中心 [256:768)^3
+        │ schema、有限值、散度、字段 SHA-256 验证
+        ▼
+persistent/results/<result_id>/ + COMPLETE
         │
         └── Interactive container 中的只读 GUI
 ```
 
-平台角色：
+scratch 只保存可重建的完整速度缓存、FFT memmap 和临时工作区；persistent 保存代码、状态、验证记录和正式中心结果。正常成功后，尺度对应的 FFT 工作区会自动清理；完整速度缓存可在确认不再复用该帧后再删除。
 
-- Interactive Compute container：环境准备、`doctor`、测试、`smoke` 和服务器 GUI；
-- shell-command Compute Job：当前用于正式单帧计算；多尺度流程在首帧验收后另行实现；
-- `Turbulence (ceph)`：Giverny 所需的数据/metadata 挂载；`isotropic1024coarse` 的实际 cutout 仍走 legacy pyJHTDB；
-- `scratch`：全域速度、FFT/memmap 和其他可重建中间量；
-- `persistent`：代码、环境、状态、QA、manifest 和正式中心结果。
+### 1.4 科学计算约定
 
-当前账户 Quotas 页面在 2026-08-28 显示 `Storage on FileServiceJHU` 为 **100 GB**，因此本项目按该账户级配额设计；旧文档中的 10 GB 默认值不适用于当前账户。SciServer 没有在项目内提供可靠的账户配额 API，所以 `doctor` 会报告配置中记录的 100 GB，并实测挂载文件系统剩余空间；提交任务前仍以 Quotas 页面为最终依据。项目默认保留至少 15 GiB persistent 安全余量。
-
-`Temporary` 的 72 小时生命周期、无备份属性和容器层非持久性仍按随项目保存的 [`Policies – SciServer.pdf`](Policies%20%E2%80%93%20SciServer.pdf) 执行。
-
-## 2. 科学数据与输出
-
-单帧输入：
-
-- dataset：`isotropic1024coarse`；
-- variable：`velocity`；
+- 数据集：`isotropic1024coarse`；
+- 周期域：`[0, 2π)^3`，不重复周期终点；
 - 完整网格：`1024^3`；
-- 周期域：`[0, 2π)^3`；
-- 内部轴顺序：`(component, z, y, x)`；
-- JHTDB request：`512^3`，完整帧共 8 个，同一时刻只允许一个请求在途；
-- scratch 校验 tile：`128^3`，完整帧共 512 个。
+- 内部速度轴顺序：`(component, z, y, x)`；
+- 梯度轴顺序：`(velocity_component, derivative_component, z, y, x)`；
+- 裁剪范围：三个方向均为半开区间 `[256, 768)`；
+- `time_index` 从 1 开始，`physical_time = (time_index - 1) × 0.002`；
+- `sigma_grid` 是以网格间距为单位的高斯标准差。
 
-所有 FFT、谱导数和谱滤波必须先在完整 `1024^3` 周期域完成。之后才提取三个轴相同的半开区间：
+谱高斯传递函数为：
 
 ```text
-x = [256, 768)
-y = [256, 768)
-z = [256, 768)
-shape = (512, 512, 512)
+G(θ) = exp[-0.5 × (sigma_grid × θ)^2]
 ```
 
-正式 persistent 结果包含：
+默认 `sigma_grid=1.0` 表示标准差为 1 个网格间距。代码没有使用有限长度的离散高斯核；如果采用“与 top-hat 二阶矩等效”的宽度约定，则 `Δ_eff = √12 σ ≈ 3.464` 个网格间距。命令行和结果目录记录的仍然是 `sigma_grid`，不是 `Δ_eff`。
+
+当前 work 的代码定义为：
+
+```text
+work_full     = Σ_i ū_i × overline[(u_j ∂_j u_i)]
+work_resolved = Σ_i ū_i × (ū_j ∂_j ū_i)
+```
+
+`regime` 根据两种 work 相对于各自阈值的正负组合编码为 uncertain、Q1、Q2、Q3、Q4。
+
+## 2. 配置、安装与使用
+
+本节集中给出从创建容器到查看结果所需的全部配置和命令。除非特别说明，所有命令都在 SciServer 上执行。
+
+### 2.1 SciServer 平台配置
+
+创建或启动 Interactive Compute container 时使用：
+
+| 项目 | 配置 |
+|---|---|
+| Compute Image | `SciServer Essentials 4.0` |
+| Data Volume | `Turbulence (ceph)` |
+| User Volume | `persistent`，读写 |
+| User Volume | `scratch`，读写 |
+| Python | Essentials 4.0 自带 Python 3.9 |
+
+不要用 Essentials 6.0 执行当前 `isotropic1024coarse` 流程。该数据集仍依赖 Essentials 4.0 中可工作的 legacy `pyJHTDB` runtime；Python 3.12 环境中的 PyPI `pyJHTDB` 占位包会主动报弃用错误。
+
+正式计算使用 shell-command Compute Job；环境准备、检查、smoke test、状态查看和 GUI 使用 Interactive container。Job 必须挂载与 Interactive container 相同的 `Turbulence (ceph)`、persistent 和 scratch。
+
+### 2.2 服务器路径
+
+```text
+项目与环境：
+/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
+
+状态与日志：
+/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/state
+
+正式结果：
+/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/results
+
+可重建中间量：
+/home/idies/workspace/Temporary/gaoxingqun/scratch/JHTDB_RUNS
+
+token：
+/home/idies/workspace/Storage/gaoxingqun/persistent/.secrets/jhtdb_token
+```
+
+项目依据账户 Quotas 页面在 2026-08-28 显示的 100 GB persistent 配额进行规划，并默认保留至少 15 GiB 安全余量。`doctor` 会实测挂载文件系统余量，但提交任务前仍以 SciServer Quotas 页面为账户配额的最终依据。scratch 按平台规则属于约 72 小时生命周期、无备份的临时空间。
+
+### 2.3 流水线配置
+
+主配置文件是 [`configs/pipeline.yaml`](configs/pipeline.yaml)。生产约束由配置加载器再次验证，未知字段会被拒绝。
+
+| 配置组 | 关键配置 | 当前值与作用 |
+|---|---|---|
+| dataset | `dataset`, `variable` | `isotropic1024coarse`, `velocity` |
+| grid | `grid_shape`, `domain_length` | `1024^3`, `2π` |
+| time | `stored_time_step` | `0.002` |
+| platform | `state_root` | persistent 中的 catalog、manifest、QA、锁和日志 |
+| platform | `run_root` | scratch 中的完整速度缓存和 FFT 工作区 |
+| platform | `result_root` | persistent 中的正式结果 |
+| auth | `token_file` | 项目目录外的 `0600` token 文件 |
+| jhtdb | `request_shape` | `512^3`；完整帧 8 个请求，严格串行 |
+| jhtdb | `tile_shape` | `128^3`；完整帧 512 个校验 tile |
+| jhtdb | `retries`, `backoff_seconds` | 请求重试和指数退避 |
+| storage | `compression_level` | Zstd/Blosc 压缩等级 3 |
+| storage | `compression_threads` | 8 个压缩线程 |
+| storage | safety reserve | persistent 15 GiB、scratch 16 GiB |
+| validation | divergence thresholds | 相对 RMS `1e-4`、相对最大值 `1e-3` |
+| physics | `sigma_grid` | 默认高斯标准差 1 个网格间距 |
+| physics | `crop_start`, `crop_shape` | `[256,256,256]`, `[512,512,512]` |
+| physics | `epsilon_abs`, `epsilon_rel` | regime 不确定区阈值参数 |
+| physics | `fft_workers` | 16 个 SciPy FFT worker |
+| physics | `fft_slab_width` | 32 层 slab，单输入块约 128 MiB |
+| physics | `cleanup_scratch_on_success` | 成功提交后清理该尺度 FFT 工作区 |
+
+`request_shape` 和 `tile_shape` 含义不同：一个 `512^3` request 从 JHTDB 获取约 1.5 GiB 未压缩速度数据，随后被写成 64 个 `128^3` checksum tile。中断后已验证 tile 会保留；若某个大 request 仍有缺块，续跑时只重新请求该大块。它们都不是本地传输分卷。
+
+下载和物理计算在前台 Terminal 中使用 Rich 动态进度行：旋转线表示进程仍在工作，进度条与计数分别显示 request 完成数和谱计算 `step/33`。该显示只面向当前命令行会话，不写入额外进度文件。
+
+### 2.4 安装
+
+在 JupyterLab Terminal 中执行：
+
+```bash
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
+bash scripts/bootstrap.sh
+source .venv/bin/activate
+```
+
+`bootstrap.sh` 会：
+
+1. 拒绝非 Linux 或不在 SciServer persistent 中的项目路径；
+2. 在安装前检查 Essentials 4.0 的 functional legacy JHTDB runtime；
+3. 创建带 `--system-site-packages` 的 `.venv`；
+4. 以 editable mode 安装项目；
+5. 导入检查所有项目依赖并编译 `src`。
+
+脚本不会运行全局 `pip check`。Essentials 4.0 镜像包含与本项目无关的 legacy 包，它们可能报告 TensorFlow/protobuf 等全局 metadata 冲突；项目使用显式 import、测试和 `doctor` 验证实际运行环境。
+
+### 2.5 JHTDB token
+
+推荐把 token 写入项目目录之外的受限文件：
+
+```bash
+mkdir -p /home/idies/workspace/Storage/gaoxingqun/persistent/.secrets
+read -rsp "JHTDB token: " JHTDB_SECRET
+printf '%s' "$JHTDB_SECRET" > /home/idies/workspace/Storage/gaoxingqun/persistent/.secrets/jhtdb_token
+unset JHTDB_SECRET
+chmod 600 /home/idies/workspace/Storage/gaoxingqun/persistent/.secrets/jhtdb_token
+```
+
+token 读取优先级：
+
+1. 当前进程环境变量 `JHTDB_TOKEN`；
+2. `pipeline.yaml` 中配置的 token 文件。
+
+检查配置状态时不会显示 token 内容：
+
+```bash
+python -m jhtdb_pipeline auth status --config configs/pipeline.yaml
+```
+
+token 不得写入 YAML、Git、CLI 参数、日志、QA、manifest 或 GUI。
+
+### 2.6 运行前检查
+
+```bash
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
+source .venv/bin/activate
+
+python -m jhtdb_pipeline doctor --config configs/pipeline.yaml
+python -m unittest discover -s tests -v
+python -m jhtdb_pipeline plan --time-index 1 --config configs/pipeline.yaml
+python -m jhtdb_pipeline smoke --time-index 1 --config configs/pipeline.yaml
+```
+
+- `doctor` 检查操作系统、路径、挂载卷写权限、空间、token、Giverny/pyJHTDB runtime 和 scratch 有效期；
+- `unittest` 运行离线单元/集成测试，不访问 JHTDB；
+- `plan` 只报告请求数量、空间、裁剪和计算资源计划，不抓取数据；
+- `smoke` 真实读取一个 `8^3` 小块，用于确认 token、runtime 和 JHTDB 连接。
+
+四项通过后再启动完整单帧任务。
+
+### 2.7 正式单帧 Compute Job
+
+在 SciServer Jobs 页面选择与 Interactive container 相同的 image 和挂载卷，提交：
+
+```bash
+bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
+```
+
+完整执行顺序：
+
+```text
+doctor → cache → validate-input → process-center → finalize-result
+```
+
+运行日志写入：
+
+```text
+state/logs/single-frame_<UTC timestamp>.log
+```
+
+相同 `time-index` 和 `sigma-grid` 的完整正式结果已经存在时，命令会复用它而不是覆盖。未完成的输入缓存可断点续跑；`process-center` 的 FFT 工作区中断后会从该计算阶段重新建立。
+
+### 2.8 分阶段运行、排错与状态
+
+正常生产任务优先使用 `single-frame`。需要排错时可在 Interactive container 中分别执行：
+
+```bash
+# 构建或续跑完整速度缓存
+python -m jhtdb_pipeline cache --time-index 1 --config configs/pipeline.yaml
+
+# 重新验证输入缓存
+python -m jhtdb_pipeline validate-input --time-index 1 --config configs/pipeline.yaml
+
+# 完整周期域计算并写入 persistent staging
+python -m jhtdb_pipeline process-center --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+
+# 校验 staging 并原子提交正式结果
+python -m jhtdb_pipeline finalize-result --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+
+# 查看输入和正式结果状态
+python -m jhtdb_pipeline status --config configs/pipeline.yaml
+```
+
+CLI 命令汇总：
+
+| 命令 | 是否访问 JHTDB | 功能 |
+|---|---:|---|
+| `auth status` | 否 | 只报告 token 是否配置及来源 |
+| `doctor` | 否 | 平台、挂载、环境、空间和 token 前检 |
+| `plan` | 否 | 请求、空间和资源计划 |
+| `smoke` | 是，小块 | `8^3` 真实读取 |
+| `cache` | 是 | 串行构建或续跑完整速度缓存 |
+| `validate-input` | 否 | 完整输入缓存验证 |
+| `process-center` | 否 | 全域谱计算并写 staging |
+| `finalize-result` | 否 | 字段级验证并提交正式结果 |
+| `single-frame` | 是 | 串联完整单帧流程 |
+| `status` | 否 | 输入缓存和正式结果状态 |
+| `gui` | 否 | 启动只读服务器 GUI |
+
+### 2.9 服务器 GUI
+
+GUI 在 Interactive container 中运行，不在 Compute Job 中运行。它只扫描 `persistent/results` 中带 `COMPLETE` 的正式结果；正在计算的 `.staging` 目录不会显示。
+
+在新的 Terminal 中执行：
+
+```bash
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
+source .venv/bin/activate
+python -m jhtdb_pipeline gui --config configs/pipeline.yaml --port 8501
+```
+
+GUI 监听 `0.0.0.0:8501`，支持：
+
+- `velocity` 与 `velocity_bar` 同色标切片对比；
+- 9 个 `gradient` 与 `gradient_bar` 分量对比；
+- 梯度线性或 SymLog 色标和显示分位数；
+- `work_full`、`work_resolved` 和 `regime`；
+- QA、manifest、散度报告和 `COMPLETE`；
+- `x/y/z` 法向与切片 index 选择。
+
+GUI 每次只从 Zarr 读取选中的二维切片，不把整个约 13 GiB 结果载入内存。浏览器只接收当前页面需要的可视化数据，不生成或下载结果归档。按 `Ctrl+C` 只停止 GUI，不影响另一个 Terminal 或 Compute Job 中的计算。
+
+需要通过当前 SciServer compute domain 提供的端口入口访问。若该 domain 不提供 Streamlit 端口代理，当前版本不会回退到本地 GUI；应增加服务器端 Jupyter 内嵌 viewer。
+
+## 3. 项目与代码详细解析
+
+### 3.1 目录结构
+
+```text
+JHU_DATA/
+├── configs/
+│   └── pipeline.yaml
+├── scripts/
+│   ├── bootstrap.sh
+│   └── run_stage.sh
+├── src/jhtdb_pipeline/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── auth.py
+│   ├── catalog.py
+│   ├── cli.py
+│   ├── config.py
+│   ├── dashboard.py
+│   ├── doctor.py
+│   ├── jhtdb.py
+│   ├── physics.py
+│   ├── planning.py
+│   ├── processing.py
+│   ├── store.py
+│   └── validation.py
+├── tests/
+│   ├── test_auth.py
+│   ├── test_catalog_store.py
+│   ├── test_coordinates.py
+│   ├── test_dashboard.py
+│   ├── test_doctor.py
+│   ├── test_fetch.py
+│   ├── test_physics.py
+│   ├── test_planning.py
+│   └── test_processing.py
+├── dashboard.py
+├── pyproject.toml
+├── README.md
+├── SCISERVER_SYSTEM_GUIDE.md
+└── Policies – SciServer.pdf
+```
+
+运行时还会创建 `.venv/`、`state/` 和 `results/`，这些不是源代码文件。完整速度缓存和 FFT workspace 只位于 scratch。
+
+### 3.2 配置与运行脚本
+
+| 文件 | 职责 |
+|---|---|
+| `configs/pipeline.yaml` | 唯一生产配置入口；定义数据集、路径、请求、存储、验证和物理参数 |
+| `scripts/bootstrap.sh` | 检查 SciServer 4.0 runtime，创建 `.venv`，安装和导入验证项目 |
+| `scripts/run_stage.sh` | Compute Job 入口；当前只接受 `single-frame`，生成带 UTC 时间戳的 persistent 日志 |
+| `pyproject.toml` | Python 包 metadata、版本、依赖范围和 `jhtdb-pipeline` console script |
+
+### 3.3 Python 包
+
+| 文件 | 职责 |
+|---|---|
+| `__init__.py` | 包标识和版本级入口 |
+| `__main__.py` | 支持 `python -m jhtdb_pipeline` |
+| `auth.py` | 从环境变量或 `0600` 文件安全读取 token；失败时关闭访问 |
+| `catalog.py` | SQLite 输入 catalog；记录 snapshot、tile、尝试次数、checksum 和状态 |
+| `cli.py` | 定义所有子命令，串联 doctor、fetch、validation、processing、finalization 和 GUI |
+| `config.py` | 加载 YAML、拒绝未知字段、验证生产约束、生成运行/结果路径和物理时间 |
+| `dashboard.py` | Streamlit + Plotly 只读 GUI；只列出带 `COMPLETE` 的结果并按需读取二维切片 |
+| `doctor.py` | 检查 Linux、挂载路径、写权限、空间、scratch 生命周期、依赖版本和 Giverny runtime |
+| `jhtdb.py` | SciServer Giverny/legacy cutout 适配、轴转换、smoke test、串行请求、重试和断点续跑 |
+| `physics.py` | 谱导数、谱高斯滤波、分轴 slab FFT、memmap、乘积累积和 regime 编码 |
+| `planning.py` | 生成 8 个 request、512 个 checksum tile、JHTDB 一基坐标范围和资源计划 |
+| `processing.py` | 完整域滤波/梯度/work/散度计算、中心裁剪、QA、staging 和正式结果提交 |
+| `store.py` | Zarr schema、Blosc/Zstd 压缩、tile 回读 checksum、结果字段哈希和只读打开规则 |
+| `validation.py` | 输入覆盖/重叠/有限值/接缝验证、manifest hash 和原子 JSON 写入 |
+
+根目录的 `dashboard.py` 是一个简短的 Streamlit 兼容入口，实际 GUI 实现位于 `src/jhtdb_pipeline/dashboard.py`。正常启动仍使用 CLI 的 `gui` 子命令。
+
+### 3.4 测试文件
+
+| 文件 | 覆盖内容 |
+|---|---|
+| `test_auth.py` | token 来源、空 token、缺失 token、权限约束和不泄露行为 |
+| `test_catalog_store.py` | catalog 唯一性、tile 写入/回读和小型完整 snapshot |
+| `test_coordinates.py` | Giverny 轴转换、request/tile 分割、一基 API 范围和周期坐标 |
+| `test_dashboard.py` | 切片轴映射、颜色范围、SymLog 和只显示 COMPLETE 结果 |
+| `test_doctor.py` | scratch 运行记录过期时拒绝继续 |
+| `test_fetch.py` | 大 request 拆分、checksum tile 持久化和断点续跑 |
+| `test_physics.py` | 周期谱导数、高斯常量保持、全部梯度轴、流式滤波等价性和 regime |
+| `test_planning.py` | 8 个请求、512 个无重叠 tile、严格串行计划和完整覆盖 |
+| `test_processing.py` | 小型端到端中心流水线、正式提交，以及散度失败时禁止 COMPLETE |
+
+### 3.5 文档与平台资料
+
+| 文件 | 职责 |
+|---|---|
+| `README.md` | 项目目的、统一操作入口、代码结构和验收标准 |
+| `SCISERVER_SYSTEM_GUIDE.md` | SciServer container、Job、persistent、scratch、ceph 和操作系统结构说明 |
+| `Policies – SciServer.pdf` | 项目依据的平台存储与生命周期规则原文 |
+
+项目不保留 Windows 启动器、`givernylocal`、keyring、本地路径、本地下载器、结果分卷器、`tar.zst` 归档或旧版全域派生数据格式。
+
+## 4. 验证、Review 与安全性检测
+
+### 4.1 自动化测试
+
+离线测试命令：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+当前测试集合覆盖认证、坐标、请求规划、断点续跑、存储、谱计算、完整处理、失败提交和 GUI。测试必须使用小型 synthetic fixture 或 fake JHTDB backend；普通测试和安装不得触发完整真实数据请求。
+
+### 4.2 输入验证门槛
+
+输入进入 `validated` 状态前必须满足：
+
+- 512 个 `128^3` tile 完整覆盖 `1024^3`，没有缺块或重叠；
+- 每个 tile 写入后回读并与内存数据计算一致的 SHA-256；
+- Giverny `(z,y,x,component)` 明确转换为 `(component,z,y,x)`；
+- API 一基闭区间与本地零基半开切片映射正确；
+- shape 为 `(3,1024,1024,1024)`、dtype 为 little-endian `float32`；
+- 所有数值有限，不包含 NaN 或 Inf；
+- 周期 wrap seam 与内部相邻面统计一致；
+- manifest hash 与 Zarr attrs、catalog 状态一致。
+
+### 4.3 物理与数值 Review
+
+计算结果必须满足：
+
+- 所有 FFT、导数和滤波都在完整 `1024^3` 周期域完成；
+- 禁止“先裁剪、后 FFT”；
+- 谱导数的数组轴与物理 `x/y/z` 方向映射明确；
+- 流式 slab 滤波与内存参考实现数值一致；
+- 常量场经过高斯滤波保持不变；
+- 中心 raw/filtered 字段使用完全相同的空间坐标；
+- 全域相对无散度 RMS 不超过 `1e-4`；
+- 全域相对最大散度不超过 `1e-3`；
+- regime 阈值和 occupancy 写入 QA。
+
+`process-center` 在散度验证失败时保留失败 staging 供诊断，但不会创建正式结果或 `COMPLETE`。
+
+### 4.4 输出 Review 与提交规则
+
+`finalize-result` 对每个字段执行：
+
+- 字段存在性、rank、shape 和 dtype 检查；
+- 分 chunk 有限值扫描；
+- 最小值、最大值、字节数和完整 SHA-256 计算；
+- `manifest.json`、`qa.json` 和 `divergence.json` 一致性记录；
+- staging 到正式目录的同文件系统原子 rename；
+- 最后创建包含 manifest hash 的 `COMPLETE`。
+
+正式目录已存在时拒绝覆盖。GUI 也要求目录具有 `COMPLETE` 且 Zarr attrs 的状态为 `complete`，因此不会把部分写入结果当成正式数据。
+
+Review 正式结果时执行：
+
+```bash
+python -m jhtdb_pipeline status --config configs/pipeline.yaml
+```
+
+随后检查对应结果目录中的：
+
+```text
+COMPLETE
+manifest.json
+qa.json
+divergence.json
+center_result.zarr/
+```
+
+### 4.5 安全性检测
+
+- token 文件必须位于项目目录之外，权限不得宽于 `0600`；
+- token 缺失、为空或权限过宽时 fail closed；
+- shell 脚本使用 `set -euo pipefail` 和 `set +x`，避免失败后继续或打印 secret；
+- token 不进入命令行参数、日志、manifest、QA、Zarr attrs 或 GUI；
+- 配置加载器拒绝未知字段和不符合生产约束的 shape/path/阈值；
+- 处理锁防止同一计算工作区被并发写入；
+- 删除临时工作区前验证目标位于预期 scratch 父目录；
+- persistent 提交不覆盖已有正式结果；
+- GUI 以只读模式打开 Zarr，不提供上传、编辑或删除操作；
+- `doctor` 在正式任务前检查 persistent/scratch 写权限、空间余量和 scratch 到期状态。
+
+### 4.6 提交任务前的人工 Review 清单
+
+1. Compute Image 是 Essentials 4.0，三个必需挂载卷都存在；
+2. Quotas 页面仍有足够 persistent 余量；
+3. `doctor` 的总状态为 `ok`；
+4. 全部离线测试通过；
+5. `plan` 显示预期的 8 个 request、512 个 checksum tile 和正确裁剪；
+6. `smoke` 返回有限的 `(3,8,8,8)` `float32` 数据；
+7. `time-index` 和 `sigma-grid` 与本次实验记录一致；
+8. 没有另一个进程正在处理同一帧和尺度；
+9. 任务结束后确认 `status`、`COMPLETE`、manifest 和 QA，再在 GUI 中 review。
+
+## 5. 数据生命周期与正式输出
+
+### 5.1 scratch 中间量
+
+单帧 scratch 目录：
+
+```text
+JHTDB_RUNS/t000001/
+├── velocity_cache.zarr/      # 完整 1024^3 × 3 速度，约 12 GiB 未压缩
+└── work_sigma_1/             # FFT memmap 与工作缓冲，成功后自动清理
+```
+
+资源计划按完整速度缓存约 12 GiB、workspace 约 28 GiB、scratch 峰值约 40 GiB 估算。scratch 是可重建数据，不是正式结果记录。
+
+### 5.2 persistent 正式结果
+
+结果路径示例：
+
+```text
+results/t000001_sigma_1/
+├── center_result.zarr/
+├── manifest.json
+├── qa.json
+├── divergence.json
+└── COMPLETE
+```
+
+字段：
 
 | 字段 | shape | dtype | 未压缩大小 |
 |---|---:|---:|---:|
@@ -66,160 +535,32 @@ shape = (512, 512, 512)
 | `work_resolved` | `(512,512,512)` | `float32` | 0.5 GiB |
 | `regime` | `(512,512,512)` | `uint8` | 0.125 GiB |
 
-单尺度合计约 13.125 GiB，另有 Zarr metadata 和文件系统开销。正式结果不打包、不分卷、不下载到本地。
+单尺度未压缩合计约 13.125 GiB，另有 Zarr metadata 和文件系统开销。正式结果不打包、不分卷、不自动下载。
 
-## 3. 分块含义
+## 6. 失败恢复与当前边界
 
-项目保留三种服务器内部 block/chunk：
-
-1. JHTDB `512^3` request block：每块约 1.5 GiB，8 个请求严格串行；
-2. `128^3` checksum tile：每个 request 拆成 64 块写入、回读并计算 SHA-256；
-3. Zarr chunk：支持增量写入和 GUI 二维切片。
-
-请求块与存储校验块明确解耦。任务中断后保留所有已验证的 `128^3` tile；若某个 `512^3` request 尚有缺块，只重新请求对应的大块，不生成第二份完整速度场。
-
-它们不是传输分卷。项目不生成 `tar.zst`、`part-*` 或本地归档。
-
-## 4. SciServer 环境
-
-建议选择：
-
-| 项目 | 选择 |
+| 情况 | 行为与处理 |
 |---|---|
-| Compute Image | `SciServer Essentials 4.0` |
-| Data Volume | `Turbulence (ceph)` |
-| User Volume | `persistent`，读写 |
-| User Volume | `scratch`，读写 |
-| Python | Essentials 4.0 自带的 Python 3.9（项目最低要求 3.9） |
+| JHTDB request 失败 | 按配置重试；相同 `cache` 命令续跑，保留已验证 tile |
+| 大 request 部分 tile 缺失 | 重新请求对应 `512^3` 大块，不生成第二份完整速度场 |
+| Interactive 浏览器关闭 | 已提交 Compute Job 继续运行 |
+| scratch run 超过配置生命周期 | `doctor` 拒绝继续信任，重新建立该帧缓存 |
+| `process-center` 中断 | 同参数重新运行该计算阶段；正式结果不受影响 |
+| 散度失败 | staging 保留诊断数据，不创建 `COMPLETE` |
+| `finalize-result` 前失败 | GUI 不显示 staging |
+| persistent 空间不足 | 停止新任务并核对 Quotas，不覆盖或静默删除正式结果 |
+| Streamlit 端口不可访问 | 增加服务器端 Jupyter viewer，不回退到本地数据流程 |
 
-不要使用 `SciServer Essentials 6.0` 运行当前 `isotropic1024coarse` 流程。该旧数据集仍会调用 legacy `pyJHTDB`，而 Essentials 6.0/Python 3.12 会取得已经弃用并主动报错的占位版本。必须使用带可用 legacy runtime 的 `SciServer Essentials 4.0`；安装时保留镜像自带的 Giverny/pyJHTDB，不用 PyPI 版本覆盖它们。
+当前边界：
 
-项目路径：
+- 只支持 `isotropic1024coarse`、`velocity`、完整 `1024^3` 输入；
+- 只支持单帧、单尺度正式任务；
+- JHTDB 同一时刻严格限制为一个请求在途；
+- 不实现本地下载、归档、结果分卷或本地 GUI；
+- 多尺度版本需要复用公共 `velocity`/`gradient` 并在提交前重新计算 persistent 容量。
 
-```text
-/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
-```
+## 7. 官方资料
 
-大型运行目录：
-
-```text
-/home/idies/workspace/Temporary/gaoxingqun/scratch/JHTDB_RUNS
-```
-
-正式结果目录：
-
-```text
-/home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA/results
-```
-
-## 5. 安装和认证
-
-在交互容器的 JupyterLab Terminal 中：
-
-```bash
-cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
-bash scripts/bootstrap.sh
-source .venv/bin/activate
-```
-
-JHTDB token 仅从以下位置读取：
-
-1. 当前进程环境变量 `JHTDB_TOKEN`；
-2. 配置指定的、项目目录之外且权限为 `0600` 的 token 文件。
-
-token 不得进入 YAML、Git、CLI 参数、日志、QA、manifest 或 GUI。
-
-## 6. 运行前检查
-
-```bash
-python -m jhtdb_pipeline doctor --config configs/pipeline.yaml
-python -m unittest discover -s tests -v
-python -m jhtdb_pipeline plan --time-index 1 --config configs/pipeline.yaml
-python -m jhtdb_pipeline smoke --time-index 1 --config configs/pipeline.yaml
-```
-
-- `doctor`：检查 SciServer、镜像、挂载卷、token 状态、空间和 scratch 到期时间；
-- `unittest`：只运行离线测试，不访问 JHTDB；
-- `plan`：只生成请求与空间计划；
-- `smoke`：读取一个 `8^3` 真实小块。
-
-完整单帧任务只有在以上检查通过后才允许启动。
-
-## 7. 正式单帧 Compute Job
-
-Jobs 页面选择相同 image、`Turbulence (ceph)`、可写 persistent 和可写 scratch，然后提交：
-
-```bash
-bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1 --sigma-grid 1.0'
-```
-
-正常执行顺序：
-
-```text
-doctor → cache → validate-input → process-center → finalize-result → status
-```
-
-- `cache` 可按 tile 断点续跑；
-- `process-center` 只把裁剪后的最终字段写入 persistent staging；
-- `finalize-result` 完整验证后才创建正式结果和 `COMPLETE`；
-- staging 不完整时不得由 GUI 当作正式数据；
-- job 完成并确认正式结果后，可删除 scratch 中间量。
-
-## 8. 服务器 GUI
-
-GUI 只读取 persistent 中存在 `COMPLETE` 标记的正式结果：
-
-```bash
-python -m jhtdb_pipeline gui --config configs/pipeline.yaml
-```
-
-它按需读取二维切片，支持：
-
-- `velocity` 与 `velocity_bar` 对比；
-- 9 个 `gradient` 与 `gradient_bar` 对比；
-- 线性或 SymLog 梯度色标；
-- `work_full`、`work_resolved` 和 `regime`；
-- QA、manifest 和尺度信息。
-
-该命令监听 `0.0.0.0:8501`。需要在交互容器的端口入口中打开；若当前 compute domain 不提供端口代理，则需在服务器端补充 Jupyter 内嵌 viewer 后再可视化，不回退到本地 GUI。
-
-## 9. 后续多尺度任务
-
-当前代码和 `run_stage.sh` **只接受单帧、单尺度**。首帧验收后再实现多尺度 job；届时公共 `velocity` 和 `gradient` 只保存一次，每个尺度分别保存 `velocity_bar`、`gradient_bar`、work 和 regime。启动前必须根据 persistent 实时余量计算可容纳的尺度数量。
-
-## 10. 项目结构
-
-```text
-JHU_DATA/
-├── configs/pipeline.yaml
-├── scripts/
-│   ├── bootstrap.sh
-│   └── run_stage.sh
-├── src/jhtdb_pipeline/
-├── tests/
-├── dashboard.py
-├── pyproject.toml
-├── README.md
-├── SCISERVER_SYSTEM_GUIDE.md
-└── Policies – SciServer.pdf
-```
-
-不保留 Windows 启动器、`givernylocal`、keyring、本地路径、本地下载器、结果分卷器或旧版全域派生数据格式。
-
-## 11. 正确性门槛
-
-- 输入 tile 覆盖完整、无重叠、SHA-256 回读一致；
-- Giverny `(z,y,x,component)` 明确转换为 `(component,z,y,x)`；
-- 所有输入和输出均检查 shape、dtype 与有限值；
-- 全域无散度验证通过；
-- 禁止“先裁剪、后 FFT”；
-- 中心 raw/filtered 字段使用完全相同的坐标与切片；
-- persistent staging 全部验证成功后才能原子提升；
-- token 不出现在任何运行产物；
-- 普通测试和安装不得触发完整真实数据任务。
-
-## 12. 官方资料
-
-- JHTDB `giverny`：<https://github.com/sciserver/giverny>
+- JHTDB Giverny：<https://github.com/sciserver/giverny>
 - SciServer Compute：<https://apps.sciserver.org/compute/>
 - SciServer Python/Jobs API：<https://www.sciserver.org/docs/sciscript-python/SciServer.html>

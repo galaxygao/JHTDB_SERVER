@@ -8,7 +8,14 @@ from pathlib import Path
 import numpy as np
 from filelock import FileLock
 from rich.console import Console
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 
 from .auth import get_token
 from .catalog import Catalog
@@ -157,6 +164,7 @@ def fetch_snapshot(cfg: PipelineConfig, time_index: int) -> Path:
             )
             catalog.set_snapshot_status(cfg.dataset, time_index, "fetching")
             with Progress(
+                SpinnerColumn("line"),
                 TextColumn("{task.description}"),
                 BarColumn(),
                 MofNCompleteColumn(),
