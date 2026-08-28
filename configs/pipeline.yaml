@@ -4,31 +4,36 @@ grid_shape: [1024, 1024, 1024]
 domain_length: 6.283185307179586
 stored_time_step: 0.002
 
-auth:
-  backend: windows_credential_manager
-  service: jhtdb_pipeline
-  username: default
+platform:
+  state_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/state
+  run_root: /home/idies/workspace/Temporary/gaoxingqun/scratch/JHTDB_RUNS
+  result_root: /home/idies/workspace/Storage/gaoxingqun/persistent/JHTDB_SCISERVER/results
+  scratch_retention_hours: 72
 
-download:
-  backend: local
+auth:
+  token_file: /home/idies/workspace/Storage/gaoxingqun/persistent/.secrets/jhtdb_token
+
+jhtdb:
   tile_shape: [128, 128, 128]
   retries: 5
   backoff_seconds: 2.0
   request_cooldown_seconds: 0.25
 
 storage:
-  root: C:/Users/gao/JHTDB_DATA
   compression_level: 3
-  safety_free_space_gib: 40
+  persistent_capacity_gb_observed: 100
+  persistent_safety_reserve_gib: 15
+  scratch_safety_reserve_gib: 16
 
 validation:
-  seam_width: 4
   divergence_relative_rms_max: 1.0e-4
   divergence_relative_max_max: 1.0e-3
 
 physics:
   sigma_grid: 1.0
+  crop_start: [256, 256, 256]
+  crop_shape: [512, 512, 512]
   epsilon_abs: 0.0
   epsilon_rel: 0.001
   fft_slab_width: 4
-  keep_intermediates: false
+  cleanup_scratch_on_success: true

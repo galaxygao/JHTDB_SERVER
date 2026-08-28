@@ -58,7 +58,7 @@ def plan(cfg: PipelineConfig, time_index: int) -> dict[str, object]:
     return {
         "dataset": cfg.dataset,
         "variable": cfg.variable,
-        "backend": cfg.download_backend,
+        "backend": "sciserver_giverny",
         "time_index": time_index,
         "physical_time": cfg.physical_time(time_index),
         "grid_shape": list(cfg.grid_shape),
@@ -67,6 +67,10 @@ def plan(cfg: PipelineConfig, time_index: int) -> dict[str, object]:
         "requests_if_no_retry": len(tiles),
         "tile_uncompressed_MiB": round(tile_bytes / 1024**2, 2),
         "snapshot_uncompressed_GiB": round(cfg.bytes_per_snapshot / 1024**3, 2),
-        "local_getcutout_limit_GiB": 3,
+        "result_crop_start_xyz": list(cfg.crop_start),
+        "result_crop_shape_xyz": list(cfg.crop_shape),
+        "result_uncompressed_GiB": round(cfg.result_uncompressed_bytes / 1024**3, 3),
+        "persistent_result_path": str(cfg.result_path(time_index)),
+        "scratch_run_path": str(cfg.run_path(time_index)),
         "usage_warning": "JHTDB recommends small targeted subsets and discourages crawling multiple full 3-D fields.",
     }

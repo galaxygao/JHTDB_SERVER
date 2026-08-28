@@ -2,30 +2,35 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import zarr
 
-from jhtdb_pipeline.catalog import Catalog
 from jhtdb_pipeline.config import load_config
+from jhtdb_pipeline.store import open_complete_result
 
 
 REGIME_LABELS = ("uncertain", "Q1: +/+", "Q2: +/-", "Q3: -/+", "Q4: -/-")
 REGIME_COLORS = [
-    [0.00, "#9e9e9e"],
-    [0.199999, "#9e9e9e"],
-    [0.20, "#1f77b4"],
-    [0.399999, "#1f77b4"],
-    [0.40, "#ff7f0e"],
-    [0.599999, "#ff7f0e"],
-    [0.60, "#2ca02c"],
-    [0.799999, "#2ca02c"],
-    [0.80, "#d62728"],
-    [1.00, "#d62728"],
+    [0.00, "#9e9e9e"], [0.199999, "#9e9e9e"],
+    [0.20, "#1f77b4"], [0.399999, "#1f77b4"],
+    [0.40, "#ff7f0e"], [0.599999, "#ff7f0e"],
+    [0.60, "#2ca02c"], [0.799999, "#2ca02c"],
+    [0.80, "#d62728"], [1.00, "#d62728"],
 ]
+
+
+def complete_result_paths(result_root: Path) -> list[Path]:
+    if not result_root.is_dir():
+        return []
+    return sorted(
+        path
+        for path in result_root.iterdir()
+        if path.is_dir() and not path.name.startswith(".") and (path / "COMPLETE").is_file()
+    )
 
 
 def extract_slice(array, component: int, axis: str, index: int) -> np.ndarray:
@@ -36,26 +41,6 @@ def extract_slice(array, component: int, axis: str, index: int) -> np.ndarray:
     if axis == "z":
         return np.asarray(array[component, index, :, :])
     raise ValueError(f"unknown axis {axis}")
-
-
-def open_snapshot_readonly(raw_store_path, time_index: int):
-    root = zarr.open_group(str(raw_store_path), mode="r")
-    return root[f"t{time_index:06d}"]["velocity"]
-
-
-def open_derived_readonly(derived_store_path, time_index: int):
-    root = zarr.open_group(str(derived_store_path), mode="r")
-    return root[f"t{time_index:06d}"]
-
-
-def open_gradient_readonly(gradient_store_path, time_index: int):
-    root = zarr.open_group(str(gradient_store_path), mode="r")
-    return root[f"t{time_index:06d}"]
-
-
-def open_filtered_readonly(filtered_store_path, time_index: int):
-    root = zarr.open_group(str(filtered_store_path), mode="r")
-    return root[f"t{time_index:06d}"]
 
 
 def extract_scalar_slice(array, axis: str, index: int) -> np.ndarray:
@@ -80,29 +65,85 @@ def extract_gradient_slice(
     raise ValueError(f"unknown axis {axis}")
 
 
-def _continuous_figure(values: np.ndarray, title: str, *, signed: bool = True):
+def _symmetric_color_limit(values: np.ndarray, percentile: float = 100.0) -> float:
+    if not 0.0 < percentile <= 100.0:
+        raise ValueError("percentile must be in (0, 100]")
+    finite_magnitudes = np.abs(values[np.isfinite(values)])
+    if not finite_magnitudes.size:
+        return 1.0
+    limit = float(np.percentile(finite_magnitudes, percentile))
+    if not np.isfinite(limit) or limit <= 0.0:
+        limit = float(np.max(finite_magnitudes))
+    return limit if limit > 0.0 else 1.0
+
+
+def _symlog_transform(values: np.ndarray, linear_threshold: float) -> np.ndarray:
+    if linear_threshold <= 0.0:
+        raise ValueError("linear_threshold must be positive")
+    values = np.asarray(values)
+    return np.sign(values) * np.log1p(np.abs(values) / linear_threshold)
+
+
+def _continuous_figure(
+    values: np.ndarray,
+    title: str,
+    *,
+    signed: bool = True,
+    color_percentile: float = 100.0,
+    scale_mode: str = "linear",
+    color_limit: float | None = None,
+):
+    if scale_mode not in {"linear", "symlog"}:
+        raise ValueError("scale_mode must be 'linear' or 'symlog'")
+    if not signed and scale_mode != "linear":
+        raise ValueError("symlog color scaling requires signed=True")
     stride = max(1, values.shape[0] // 512)
     shown = values[::stride, ::stride]
+    displayed = shown
     kwargs = {}
     if signed:
-        finite = shown[np.isfinite(shown)]
-        limit = float(np.max(np.abs(finite))) if finite.size else 1.0
-        limit = limit or 1.0
-        kwargs = {"zmin": -limit, "zmax": limit}
+        limit = (
+            _symmetric_color_limit(shown, color_percentile)
+            if color_limit is None
+            else float(color_limit)
+        )
+        if not np.isfinite(limit) or limit <= 0.0:
+            raise ValueError("color_limit must be finite and positive")
+        displayed_limit = limit
+        if scale_mode == "symlog":
+            linear_threshold = limit * 0.01
+            displayed = _symlog_transform(shown, linear_threshold)
+            displayed_limit = float(
+                _symlog_transform(np.asarray(limit), linear_threshold)
+            )
+        kwargs = {"zmin": -displayed_limit, "zmax": displayed_limit}
     figure = px.imshow(
-        shown,
+        displayed,
         origin="lower",
         color_continuous_scale="RdBu_r" if signed else "Viridis",
         aspect="equal",
         **kwargs,
     )
+    if signed and scale_mode == "symlog":
+        raw_ticks = limit * np.asarray([-1.0, -0.1, -0.01, 0.0, 0.01, 0.1, 1.0])
+        transformed_ticks = _symlog_transform(raw_ticks, linear_threshold)
+        figure.update_traces(
+            customdata=shown,
+            hovertemplate="x=%{x}<br>y=%{y}<br>value=%{customdata:.6g}<extra></extra>",
+        )
+        figure.update_coloraxes(
+            colorbar={
+                "tickvals": transformed_ticks.tolist(),
+                "ticktext": [f"{value:.3g}" for value in raw_ticks],
+                "title": "value (SymLog)",
+            }
+        )
     figure.update_layout(title=title)
     return figure
 
 
 def _regime_figure(values: np.ndarray, title: str):
-    stride = max(1, values.shape[0] // 512)
-    shown = np.asarray(values[::stride, ::stride], dtype=np.uint8)
+    shown = np.asarray(values, dtype=np.uint8)
     labels = np.asarray(REGIME_LABELS, dtype=object)[np.clip(shown, 0, 4)]
     figure = go.Figure(
         go.Heatmap(
@@ -121,198 +162,95 @@ def _regime_figure(values: np.ndarray, title: str):
 
 
 def main() -> None:
-    st.set_page_config(page_title="JHTDB full-domain viewer", layout="wide")
-    config_path = os.environ.get("JHTDB_PIPELINE_CONFIG", "configs/pipeline.yaml")
-    cfg = load_config(config_path)
-    st.title("JHTDB 全周期域速度场（只读）")
-    st.caption(f"Data root: {cfg.storage_root}")
-    if not cfg.catalog_path.exists() or not cfg.raw_store_path.exists():
-        st.info("尚无已下载数据。")
+    st.set_page_config(page_title="JHTDB SciServer viewer", layout="wide")
+    cfg = load_config(os.environ.get("JHTDB_PIPELINE_CONFIG", "configs/pipeline.yaml"))
+    st.title("JHTDB 中心周期域结果（服务器只读）")
+    paths = complete_result_paths(cfg.result_root)
+    if not paths:
+        st.info("persistent 中还没有带 COMPLETE 标记的正式结果。")
         return
-    with Catalog(cfg.catalog_path) as catalog:
-        snapshots = catalog.snapshots(cfg.dataset)
-        if not snapshots:
-            st.info("catalog 中没有快照。")
-            return
-        labels = [f"{row['time_index']} | t={row['physical_time']:.6f} | {row['status']}" for row in snapshots]
-        selected = st.sidebar.selectbox("Snapshot", range(len(labels)), format_func=lambda i: labels[i])
-        row = snapshots[selected]
-        time_index = int(row["time_index"])
-        tiles = catalog.tiles(cfg.dataset, time_index)
-    st.subheader("状态")
-    verified = sum(tile["status"] == "verified" for tile in tiles)
-    st.write({"time_index": time_index, "status": row["status"], "verified_tiles": f"{verified}/{len(tiles)}"})
-
-    page = st.sidebar.radio(
-        "页面",
-        ("原始速度", "速度梯度", "滤波速度与梯度", "Work 与 regime", "质量报告"),
+    selected = st.sidebar.selectbox("Result", paths, format_func=lambda path: path.name)
+    result = open_complete_result(selected)
+    st.caption(
+        f"{selected} | frame={result.attrs['time_index']} | "
+        f"sigma={result.attrs['sigma_grid']}"
     )
-    axis = st.sidebar.selectbox("切片法向", ["z", "y", "x"])
-    index = st.sidebar.slider("切片 index", 0, cfg.grid_shape[0] - 1, cfg.grid_shape[0] // 2)
+    page = st.sidebar.radio("页面", ("速度对比", "梯度对比", "Work 与 regime", "QA"))
+    axis = st.sidebar.selectbox("切片法向", ("z", "y", "x"))
+    index = st.sidebar.slider("中心域切片 index", 0, result["work_full"].shape[0] - 1, result["work_full"].shape[0] // 2)
 
-    if page == "原始速度":
-        array = open_snapshot_readonly(cfg.raw_store_path, time_index)
-        component = st.sidebar.selectbox("速度分量", [0, 1, 2], format_func=lambda i: ["ux", "uy", "uz"][i])
-        plane = extract_slice(array, component, axis, index)
-        st.plotly_chart(
-            _continuous_figure(plane, f"{['ux','uy','uz'][component]} · {axis}={index}"),
+    if page == "速度对比":
+        component = st.sidebar.selectbox(
+            "速度分量", (0, 1, 2), format_func=lambda value: ("ux", "uy", "uz")[value]
+        )
+        raw = extract_slice(result["velocity"], component, axis, index)
+        filtered = extract_slice(result["velocity_bar"], component, axis, index)
+        limit = _symmetric_color_limit(np.stack((raw, filtered)))
+        left, right = st.columns(2)
+        left.plotly_chart(
+            _continuous_figure(raw, "velocity", color_limit=limit),
             use_container_width=True,
         )
-        if row["status"] != "auto_validated":
-            st.warning("该快照尚未完成自动验证；未下载区域可能显示为空白。")
-
-    elif page == "速度梯度":
-        if not cfg.gradient_store_path.exists():
-            st.info("尚无托管梯度。先运行 gradient。")
-        else:
-            try:
-                gradient_group = open_gradient_readonly(
-                    cfg.gradient_store_path, time_index
-                )
-            except KeyError:
-                st.info("当前时间帧尚无托管梯度。")
-            else:
-                if gradient_group.attrs.get("status") != "complete":
-                    st.warning("梯度尚未全部完成并验证，暂不绘图。")
-                else:
-                    velocity_component = st.sidebar.selectbox(
-                        "速度分量 i", [0, 1, 2], format_func=lambda i: ["ux", "uy", "uz"][i]
-                    )
-                    derivative_component = st.sidebar.selectbox(
-                        "求导方向 j", [0, 1, 2], format_func=lambda j: ["x", "y", "z"][j]
-                    )
-                    gradient = gradient_group["gradient"]
-                    plane = extract_gradient_slice(
-                        gradient,
-                        velocity_component,
-                        derivative_component,
-                        axis,
-                        index,
-                    )
-                    title = (
-                        f"∂u{['x','y','z'][velocity_component]}"
-                        f"/∂{['x','y','z'][derivative_component]} · {axis}={index}"
-                    )
-                    st.plotly_chart(
-                        _continuous_figure(plane, title), use_container_width=True
-                    )
-                    st.caption(
-                        f"gradient manifest: {gradient_group.attrs.get('manifest_hash', 'missing')}"
-                    )
-
-    elif page == "滤波速度与梯度":
-        if not cfg.filtered_store_path.exists():
-            st.info("尚无完成的滤波速度与梯度。先运行 gradient。")
-        else:
-            try:
-                filtered = open_filtered_readonly(cfg.filtered_store_path, time_index)
-            except KeyError:
-                st.info("当前时间帧尚无滤波速度与梯度。")
-            else:
-                if filtered.attrs.get("status") != "complete":
-                    st.warning("滤波预处理尚未完成并验证，暂不绘图。")
-                else:
-                    field = st.sidebar.radio("滤波场", ("velocity_bar", "gradient_bar"))
-                    velocity_component = st.sidebar.selectbox(
-                        "速度分量 i",
-                        [0, 1, 2],
-                        format_func=lambda i: ["ux", "uy", "uz"][i],
-                    )
-                    if field == "velocity_bar":
-                        plane = extract_slice(
-                            filtered["velocity_bar"], velocity_component, axis, index
-                        )
-                        title = (
-                            f"filtered u{['x','y','z'][velocity_component]} · {axis}={index}"
-                        )
-                    else:
-                        derivative_component = st.sidebar.selectbox(
-                            "求导方向 j",
-                            [0, 1, 2],
-                            format_func=lambda j: ["x", "y", "z"][j],
-                        )
-                        plane = extract_gradient_slice(
-                            filtered["gradient_bar"],
-                            velocity_component,
-                            derivative_component,
-                            axis,
-                            index,
-                        )
-                        title = (
-                            f"∂filtered u{['x','y','z'][velocity_component]}"
-                            f"/∂{['x','y','z'][derivative_component]} · {axis}={index}"
-                        )
-                    st.plotly_chart(
-                        _continuous_figure(plane, title), use_container_width=True
-                    )
-                    st.caption(
-                        f"filtered manifest: {filtered.attrs.get('manifest_hash', 'missing')}"
-                    )
-
+        right.plotly_chart(
+            _continuous_figure(filtered, "velocity_bar", color_limit=limit),
+            use_container_width=True,
+        )
+    elif page == "梯度对比":
+        component = st.sidebar.selectbox(
+            "速度分量 i", (0, 1, 2), format_func=lambda value: ("ux", "uy", "uz")[value]
+        )
+        derivative = st.sidebar.selectbox(
+            "求导方向 j", (0, 1, 2), format_func=lambda value: ("x", "y", "z")[value]
+        )
+        label = st.sidebar.radio("梯度色标", ("线性", "SymLog"), horizontal=True)
+        percentile = st.sidebar.slider("色标覆盖分位数 (%)", 90.0, 100.0, 99.0, 0.5)
+        mode = "linear" if label == "线性" else "symlog"
+        raw = extract_gradient_slice(result["gradient"], component, derivative, axis, index)
+        filtered = extract_gradient_slice(result["gradient_bar"], component, derivative, axis, index)
+        limit = _symmetric_color_limit(np.stack((raw, filtered)), percentile)
+        left, right = st.columns(2)
+        left.plotly_chart(
+            _continuous_figure(
+                raw,
+                "gradient",
+                color_percentile=percentile,
+                scale_mode=mode,
+                color_limit=limit,
+            ),
+            use_container_width=True,
+        )
+        right.plotly_chart(
+            _continuous_figure(
+                filtered,
+                "gradient_bar",
+                color_percentile=percentile,
+                scale_mode=mode,
+                color_limit=limit,
+            ),
+            use_container_width=True,
+        )
     elif page == "Work 与 regime":
-        if not cfg.derived_store_path.exists():
-            st.info("尚无物理计算结果。先运行 compute。")
-        else:
-            try:
-                derived = open_derived_readonly(cfg.derived_store_path, time_index)
-            except KeyError:
-                st.info("当前时间帧尚无物理计算结果。")
-            else:
-                derived_status = derived.attrs.get("status", "incomplete")
-                if derived_status != "complete":
-                    st.warning(f"物理结果状态为 {derived_status}；为避免展示半成品，暂不绘图。")
-                else:
-                    full_plane = extract_scalar_slice(derived["work_full"], axis, index)
-                    resolved_plane = extract_scalar_slice(derived["work_resolved"], axis, index)
-                    regime_plane = extract_scalar_slice(derived["regime"], axis, index)
-                    left, right = st.columns(2)
-                    left.plotly_chart(
-                        _continuous_figure(full_plane, f"work_full · {axis}={index}"),
-                        use_container_width=True,
-                    )
-                    right.plotly_chart(
-                        _continuous_figure(resolved_plane, f"work_resolved · {axis}={index}"),
-                        use_container_width=True,
-                    )
-                    st.plotly_chart(
-                        _regime_figure(regime_plane, f"regime · {axis}={index}"),
-                        use_container_width=True,
-                    )
-                    metrics = st.columns(2)
-                    metrics[0].metric("epsilon_full", f"{float(derived.attrs['epsilon_full']):.6g}")
-                    metrics[1].metric("epsilon_resolved", f"{float(derived.attrs['epsilon_resolved']):.6g}")
-                    occupancy = dict(derived.attrs.get("occupancy", {}))
-                    if occupancy:
-                        st.subheader("全域 regime 占比")
-                        st.bar_chart(occupancy)
-
+        full = extract_scalar_slice(result["work_full"], axis, index)
+        resolved = extract_scalar_slice(result["work_resolved"], axis, index)
+        codes = extract_scalar_slice(result["regime"], axis, index)
+        left, right = st.columns(2)
+        left.plotly_chart(_continuous_figure(full, "work_full"), use_container_width=True)
+        right.plotly_chart(_continuous_figure(resolved, "work_resolved"), use_container_width=True)
+        st.plotly_chart(_regime_figure(codes, "regime"), use_container_width=True)
+        st.json(dict(result.attrs.get("occupancy", {})))
     else:
-        st.subheader("原始数据 QA")
-        qa_file = cfg.qa_path / f"t{time_index:06d}.json"
-        if qa_file.exists():
-            st.json(json.loads(qa_file.read_text(encoding="utf-8")))
-        else:
-            st.info("原始数据 QA 尚未生成。")
-        st.subheader("梯度 FD8 审计")
-        gradient_audit_file = cfg.qa_path / f"gradient_audit_t{time_index:06d}.json"
-        if gradient_audit_file.exists():
-            st.json(json.loads(gradient_audit_file.read_text(encoding="utf-8")))
-        else:
-            st.info("梯度 FD8 审计尚未生成。")
-        st.subheader("全域无散性")
-        divergence_file = cfg.qa_path / f"divergence_t{time_index:06d}.json"
-        if divergence_file.exists():
-            st.json(json.loads(divergence_file.read_text(encoding="utf-8")))
-        else:
-            st.info("全域无散性报告尚未生成。")
-        st.subheader("物理计算报告")
-        physics_file = cfg.qa_path / f"physics_t{time_index:06d}.json"
-        if physics_file.exists():
-            st.json(json.loads(physics_file.read_text(encoding="utf-8")))
-        else:
-            st.info("物理计算报告尚未生成。")
+        for filename in ("manifest.json", "qa.json", "divergence.json", "COMPLETE"):
+            path = selected / filename
+            st.subheader(filename)
+            if path.is_file():
+                try:
+                    st.json(json.loads(path.read_text(encoding="utf-8")))
+                except json.JSONDecodeError:
+                    st.code(path.read_text(encoding="utf-8"))
+            else:
+                st.warning("missing")
 
-    st.caption("本 GUI 不写入 raw 数据、不保存 accept/reject，也不控制物理计算。")
+    st.caption("本 GUI 只读取服务器 persistent 正式结果，不写数据、不访问本地文件。")
 
 
 if __name__ == "__main__":

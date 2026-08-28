@@ -3,15 +3,15 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .coverage
+.venv/
 
-# Project data must live outside this Git/cloud-sync workspace.
-data/
-raw/
-derived/
-scratch/
+# SciServer runtime products (persistent paths under the project directory).
+state/
+results/
+
+# Defensive ignores for accidental runtime stores.
 *.zarr/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
 *.partial
-

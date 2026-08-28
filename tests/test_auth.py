@@ -1,36 +1,49 @@
 from __future__ import annotations
 
 import io
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
-from jhtdb_pipeline.auth import set_token
+from jhtdb_pipeline.auth import get_token, has_token, token_source
 from jhtdb_pipeline.cli import main
 from jhtdb_pipeline.config import load_config
 
 
 class AuthTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = load_config("configs/pipeline.yaml")
+        self.cfg = replace(load_config("configs/pipeline.yaml"), token_file=None)
 
-    @patch("jhtdb_pipeline.auth.keyring.set_password")
-    @patch("builtins.input", return_value="plain-token")
-    def test_set_token_uses_visible_input(self, mock_input, mock_set_password) -> None:
-        set_token(self.cfg)
-        mock_input.assert_called_once_with("JHTDB token: ")
-        mock_set_password.assert_called_once_with(
-            self.cfg.auth_service, self.cfg.auth_username, "plain-token"
-        )
+    def test_environment_token_is_used_without_being_reported(self) -> None:
+        with patch.dict(os.environ, {"JHTDB_TOKEN": "secret-value"}, clear=False):
+            self.assertTrue(has_token(self.cfg))
+            self.assertEqual(token_source(self.cfg), "environment")
+            self.assertEqual(get_token(self.cfg), "secret-value")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["auth", "status"])
+            self.assertEqual(code, 0)
+            self.assertNotIn("secret-value", output.getvalue())
 
-    @patch("jhtdb_pipeline.cli.get_token", return_value="plain-token")
-    @patch("jhtdb_pipeline.cli.has_token", return_value=True)
-    def test_auth_status_can_show_token(self, _mock_has_token, _mock_get_token) -> None:
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exit_code = main(["auth", "status", "--show-token"])
-        self.assertEqual(exit_code, 0)
-        self.assertIn('"token": "plain-token"', output.getvalue())
+    def test_token_file_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "token"
+            path.write_text("file-token\n", encoding="utf-8")
+            path.chmod(0o600)
+            cfg = replace(self.cfg, token_file=path)
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(token_source(cfg), "file")
+                self.assertEqual(get_token(cfg), "file-token")
+
+    def test_missing_token_fails_closed(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(has_token(self.cfg))
+            with self.assertRaisesRegex(RuntimeError, "not configured"):
+                get_token(self.cfg)
 
 
 if __name__ == "__main__":
