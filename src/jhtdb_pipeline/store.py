@@ -97,7 +97,13 @@ def create_result_group(
     path = staging / result_zarr_name(sigma_grid)
     root = zarr.open_group(str(path), mode="w" if overwrite else "a")
     nz, ny, nx = cfg.result_shape_zyx
+    full_nz, full_ny, full_nx = cfg.full_shape_zyx
     cz, cy, cx = (min(64, nz), min(64, ny), min(64, nx))
+    full_chunks = (
+        min(64, full_nz),
+        min(64, full_ny),
+        min(64, full_nx),
+    )
     codec = compressor(cfg)
     root.attrs.update(
         {
@@ -114,6 +120,18 @@ def create_result_group(
             "derivative_components": ["x", "y", "z"],
             "crop_start_xyz": list(cfg.crop_start),
             "crop_shape_xyz": list(cfg.crop_shape),
+            "full_shape_xyz": list(cfg.grid_shape),
+            "field_scopes": {
+                "velocity": "center_crop",
+                "gradient": "center_crop",
+                "velocity_bar": "center_crop",
+                "gradient_bar": "center_crop",
+                "regime": "center_crop",
+                "work_full": "full_domain",
+                "work_resolved": "full_domain",
+                "pi": "full_domain",
+                "s_bar": "full_domain",
+            },
         }
     )
     root.require_dataset(
@@ -134,7 +152,9 @@ def create_result_group(
     )
     for name in ("work_full", "work_resolved", "pi", "s_bar"):
         root.require_dataset(
-            name, shape=(nz, ny, nx), chunks=(cz, cy, cx),
+            name,
+            shape=(full_nz, full_ny, full_nx),
+            chunks=full_chunks,
             dtype="<f4", compressor=codec, fill_value=np.nan,
         )
     root.require_dataset(

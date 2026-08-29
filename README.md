@@ -1,6 +1,6 @@
 # JHTDB SciServer 全周期域中心流水线
 
-本项目只在 Johns Hopkins SciServer 上运行。它从 JHTDB 获取 `isotropic1024coarse` 的单帧完整速度场，在完整周期域上完成谱导数与谱高斯滤波，只把中心 `512^3` 区域的速度、梯度、功和状态分类保存到 SciServer persistent，并在 Interactive container 中提供只读 GUI。科学数据不下载到本地电脑，也不依赖本地文件系统。
+本项目只在 Johns Hopkins SciServer 上运行。它从 JHTDB 获取 `isotropic1024coarse` 的单帧完整速度场，在完整周期域上完成谱导数与谱高斯滤波，把中心 `512^3` 的速度、梯度和状态分类以及全域 `1024^3` 的四个能量场保存到 SciServer persistent，并在 Interactive container 中提供只读 GUI。科学数据不下载到本地电脑，也不依赖本地文件系统。
 
 SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERVER_SYSTEM_GUIDE.md`](SCISERVER_SYSTEM_GUIDE.md)。本 README 是项目功能、配置、安装、运行、代码结构和验收标准的主入口。
 
@@ -11,9 +11,9 @@ SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERV
 项目解决以下问题：
 
 - 从 JHTDB 可靠地获取一帧完整 `1024^3 × 3` 周期速度场；
-- 避免把完整原始数据和全域派生量长期保存在 persistent；
+- 避免把可重建的完整原始速度和 FFT 工作场长期保存在 persistent；
 - 保证 FFT、谱导数和滤波在完整周期域上进行，避免先裁剪造成边界伪影；
-- 永久保存中心 `512^3` 的未滤波/滤波速度、未滤波/滤波梯度、work 和 regime；
+- 永久保存中心 `512^3` 的未滤波/滤波速度、梯度和 regime，以及全域四个能量场；
 - 在服务器上直接查看正式结果，不下载结果归档到本地；
 - 对下载、坐标、物理计算、输出提交和 token 使用建立可审计的验证链。
 
@@ -27,6 +27,7 @@ SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERV
 - 中心 `[256:768)^3` 裁剪；
 - 服务器 persistent 中的 Zarr 正式结果；
 - 全域无散度检查、shape/dtype/有限值检查和逐字段 SHA-256；
+- 可重复运行的全域 S̄ QA、三层判据和四场净总量柱状图；
 - staging 到正式结果的原子提交和 `COMPLETE` 标记；
 - Streamlit + Plotly 只读服务器 GUI，按需读取二维切片。
 
@@ -44,7 +45,8 @@ scratch/velocity_cache.zarr
         │ FFT 谱导数 + 谱高斯滤波 + work
         ▼
 persistent/results/.staging/<result_id>
-        │ 只写中心 [256:768)^3
+        │ 速度/梯度/regime 写中心 [256:768)^3
+        │ W_full/W_res/Π/S̄ 写完整 1024^3
         │ schema、有限值、散度、字段 SHA-256 验证
         ▼
 persistent/results/<result_id>/ + COMPLETE
@@ -52,7 +54,7 @@ persistent/results/<result_id>/ + COMPLETE
         └── Interactive container 中的只读 GUI
 ```
 
-scratch 只保存可重建的完整速度缓存、FFT memmap 和临时工作区；persistent 保存代码、状态、验证记录和正式中心结果。正常成功后，尺度对应的 FFT 工作区会自动清理；完整速度缓存可在确认不再复用该帧后再删除。
+scratch 只保存可重建的完整速度缓存、FFT memmap 和临时工作区；persistent 保存代码、状态、验证记录、中心速度/梯度/regime 和四个全域能量场。正常成功后，尺度对应的 FFT 工作区会按配置清理；完整速度缓存可在确认不再 backfill 该帧后再删除。
 
 ### 1.4 科学计算约定
 
@@ -154,6 +156,7 @@ token：
 | storage | `compression_threads` | 8 个压缩线程 |
 | storage | safety reserve | persistent 15 GiB、scratch 16 GiB |
 | validation | divergence thresholds | 原始和滤波速度各自的相对 RMS `1e-4`、相对最大值 `1e-3` |
+| validation | S̄ QA thresholds | 能量等式 RMS `1e-4`、`S_bar_rel_self` `1e-4`、`S_bar_vs_Pi_net` `1e-2` |
 | physics | `sigma_grid` | 高斯标准差列表；默认生产配置为 `[1.0,2.0,3.0]` 个网格间距 |
 | physics | `crop_start`, `crop_shape` | `[256,256,256]`, `[512,512,512]` |
 | physics | `epsilon_abs`, `epsilon_rel` | regime 不确定区阈值参数 |
@@ -300,9 +303,9 @@ doctor → cache → validate-input → process-center → finalize-result
 state/logs/single-frame_<UTC timestamp>.log
 ```
 
-省略 `--sigma-grid` 时，命令依次计算配置中的全部 `physics.sigma_grid`；提供该参数时只计算指定尺度。相同 `time-index` 和 `sigma-grid` 的当前完整结果已经存在时，命令会复用它。字段完整的 schema v2 结果会直接读取已保存的 `gradient_bar`，完成中心滤波散度检查并原地升级到 v3，不重新执行 FFT 或四个能量计算；缺少 `pi/s_bar` 的更旧结果仍会保留到新版 staging 完整计算并通过字段校验后再替换。未完成的输入缓存可断点续跑；`process-center` 的 FFT 工作区中断后会从该计算阶段重新建立。
+省略 `--sigma-grid` 时，命令依次计算配置中的全部 `physics.sigma_grid`；提供该参数时只计算指定尺度。相同 `time-index` 和 `sigma_grid` 的完整 v4 结果已经存在时直接复用。旧 v2/v3 只有中心四场，无法仅靠元数据升级为全域 v4；使用 `backfill-full-fields` 可优先复用 temporary 中已验证的滤波速度，否则复用 `velocity_cache.zarr`，不会重新访问 JHTDB。旧 persistent 结果保留到 v4 staging 完成、中心重叠一致且字段校验通过后才替换。
 
-尺度采用顺序批处理，不会同时启动多个约 52 GiB scratch 峰值的 FFT 流程。当前每个尺度的正式结果未压缩约 14.125 GiB，`plan` 会同时报告单尺度和整个配置列表的容量计划。
+尺度采用顺序批处理，不会同时启动多个约 52 GiB scratch 峰值的 FFT 流程。v4 每个尺度未压缩约 28.125 GiB，三个尺度约 84.375 GiB；100 GB 十进制配额折合约 93.1 GiB，无法再同时满足 15 GiB reserve，因此必须先用 `plan` 和 Quotas 决定尺度数量或扩容。
 
 ### 2.8 分阶段运行、排错与状态
 
@@ -321,8 +324,11 @@ python -m jhtdb_pipeline process-center --time-index 1 --sigma-grid 1.0 --config
 # 校验 staging 并原子提交正式结果
 python -m jhtdb_pipeline finalize-result --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
-# 仅用已有 gradient_bar 将完整 schema v2 结果升级到 v3
-python -m jhtdb_pipeline upgrade-result --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+# 用已有 temporary 数据把 v2/v3 中心结果补算为全域 v4
+python -m jhtdb_pipeline backfill-full-fields --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+
+# 对完整 v4 四场重复运行全域 S_bar QA 和柱状图
+python -m jhtdb_pipeline qa-sbar --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
 # 查看输入和正式结果状态
 python -m jhtdb_pipeline status --config configs/pipeline.yaml
@@ -340,7 +346,9 @@ CLI 命令汇总：
 | `validate-input` | 否 | 完整输入缓存验证 |
 | `process-center` | 否 | 全域谱计算并写 staging |
 | `finalize-result` | 否 | 字段级验证并提交正式结果 |
-| `upgrade-result` | 否 | 从已有 `gradient_bar` 检查中心滤波散度，并将完整 v2 结果原地升级为 v3 |
+| `backfill-full-fields` | 否 | 复用 temporary 数据，把已有 v2/v3 结果补算成全域 v4 |
+| `qa-sbar` | 否 | 读取 v4 全域四场，重算三层 S̄ QA 与净总量柱状图 |
+| `upgrade-result` | 否 | `backfill-full-fields` 的兼容别名 |
 | `single-frame` | 是 | 串联完整单帧流程，并顺序批量处理配置的滤波尺度 |
 | `status` | 否 | 输入缓存和正式结果状态 |
 | `gui` | 否 | 启动只读服务器 GUI |
@@ -440,7 +448,8 @@ JHU_DATA/
 | `jhtdb.py` | SciServer Giverny/legacy cutout 适配、轴转换、smoke test、串行请求、重试和断点续跑 |
 | `physics.py` | 谱导数、谱高斯滤波、分轴 slab FFT、memmap、乘积累积和 regime 编码 |
 | `planning.py` | 生成 8 个 request、512 个 checksum tile、JHTDB 一基坐标范围和资源计划 |
-| `processing.py` | 完整域滤波/梯度/work/散度计算、中心裁剪、QA、staging 和正式结果提交 |
+| `processing.py` | 完整域滤波/梯度/四场计算、中心字段裁剪、复用/backfill、staging 和正式结果提交 |
+| `sbar_qa.py` | 流式读取全域四场，计算 S̄ 三层 QA，并写 JSON 与 Plotly 柱状图 |
 | `store.py` | Zarr schema、Blosc/Zstd 压缩、tile 回读 checksum、结果字段哈希和只读打开规则 |
 | `validation.py` | 输入覆盖/重叠/有限值/接缝验证、manifest hash 和原子 JSON 写入 |
 
@@ -453,12 +462,13 @@ JHU_DATA/
 | `test_auth.py` | token 来源、空 token、缺失 token、权限约束和不泄露行为 |
 | `test_catalog_store.py` | catalog 唯一性、tile 写入/回读和小型完整 snapshot |
 | `test_coordinates.py` | Giverny 轴转换、request/tile 分割、一基 API 范围和周期坐标 |
-| `test_dashboard.py` | 切片轴映射、颜色范围、SymLog 和只显示 COMPLETE 结果 |
+| `test_dashboard.py` | 中心/全域切片映射、柱状图、颜色范围、SymLog 和 COMPLETE 过滤 |
 | `test_doctor.py` | scratch 运行记录过期时拒绝继续 |
 | `test_fetch.py` | 大 request 拆分、checksum tile 持久化和断点续跑 |
 | `test_physics.py` | 周期谱导数、高斯常量保持、全部梯度轴、流式滤波等价性和 regime |
 | `test_planning.py` | 8 个请求、512 个无重叠 tile、严格串行计划和完整覆盖 |
-| `test_processing.py` | 小型端到端中心流水线、正式提交，以及散度失败时禁止 COMPLETE |
+| `test_processing.py` | 小型端到端全域四场、temporary 复用、正式提交和散度失败门槛 |
+| `test_sbar_qa.py` | 三层 S̄ 判据、全域净和、零分母 JSON 安全和图表产物 |
 
 ### 3.5 文档与平台资料
 
@@ -507,9 +517,11 @@ python -m unittest discover -s tests -v
 - 中心 raw/filtered 字段使用完全相同的空间坐标；
 - 原始速度和滤波速度各自的全域相对无散度 RMS 不超过 `1e-4`；
 - 原始速度和滤波速度各自的全域相对最大散度不超过 `1e-3`；
+- 全域能量等式残差 RMS 不超过 `1e-4`；
+- `|ΣS̄|/Σ|S̄|` 不超过 `1e-4`，且 `|ΣS̄|/|ΣΠ|` 不超过 `1e-2`；
 - regime 阈值和 occupancy 写入 QA。
 
-`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套统计；顶层 `passed` 只有在两者都通过时才为 `true`。新计算结果的两套 `scope` 都是 `full_domain`。从 v2 原地升级时，原速度沿用既有全域检查，滤波速度从已保存的中心 `gradient_bar` 检查，因此其 `scope` 明确记录为 `stored_center_crop`。`process-center` 在任一速度场散度验证失败时保留失败 staging 供诊断，但不会创建正式结果或 `COMPLETE`。
+`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套全域统计。`s_bar_qa.json` 记录四个全域净和、绝对和、能量等式残差以及两个 S̄ 比率；`s_bar_global_totals.html` 是可离线打开的四柱图。`qa-sbar` 只接受 schema v4 全域结果，旧中心结果不能冒充全域 QA。`process-center` 在任一速度场散度验证失败时保留失败 staging，不创建 `COMPLETE`；S̄ QA 失败会保留全域数据供诊断，并在 attrs/QA 中明确标记失败。
 
 ### 4.4 输出 Review 与提交规则
 
@@ -519,10 +531,11 @@ python -m unittest discover -s tests -v
 - 分 chunk 有限值扫描；
 - 最小值、最大值、字节数和完整 SHA-256 计算；
 - `manifest.json`、`qa.json` 和 `divergence.json` 一致性记录；
+- `s_bar_qa.json` 与 `s_bar_global_totals.html`；
 - staging 到正式目录的同文件系统原子 rename；
 - 最后创建包含 manifest hash 的 `COMPLETE`。
 
-当前 schema 的正式目录已存在时拒绝覆盖。字段完整的 v2 结果可直接升级元数据；缺少 `pi/s_bar` 的旧 schema 结果只会在新版 staging 完成全部校验后被替换。GUI 也要求目录具有 `COMPLETE` 且 Zarr attrs 的状态为 `complete`，因此不会把部分写入结果当成正式数据。
+当前 schema 的正式目录已存在时拒绝覆盖。v2/v3 结果必须补算缺失的中心外区域，不能直接改版本号；旧结果只会在 v4 staging 完成、已有中心四场重叠校验一致且字段校验通过后被替换。GUI 要求目录具有 `COMPLETE` 且 Zarr attrs 状态为 `complete`，不会把部分写入结果当成正式数据。
 
 Review 正式结果时执行：
 
@@ -537,6 +550,8 @@ COMPLETE
 manifest.json
 qa.json
 divergence.json
+s_bar_qa.json
+s_bar_global_totals.html
 center_result_sigma_<sigma_tag>.zarr/
 ```
 
@@ -549,7 +564,7 @@ center_result_sigma_<sigma_tag>.zarr/
 - 配置加载器拒绝未知字段和不符合生产约束的 shape/path/阈值；
 - 处理锁防止同一计算工作区被并发写入；
 - 删除临时工作区前验证目标位于预期 scratch 父目录；
-- persistent 提交不覆盖当前 schema 的正式结果；完整 v2 可原地升级，其他旧 schema 只在新版校验完成后替换；
+- persistent 提交不覆盖当前 schema 的正式结果；v2/v3 只在 v4 补算和校验完成后替换；
 - GUI 以只读模式打开 Zarr，不提供上传、编辑或删除操作；
 - `doctor` 在正式任务前检查 persistent/scratch 写权限、空间余量和 scratch 到期状态。
 
@@ -589,6 +604,8 @@ results/t000001_sigma_1/
 ├── manifest.json
 ├── qa.json
 ├── divergence.json
+├── s_bar_qa.json
+├── s_bar_global_totals.html
 └── COMPLETE
 ```
 
@@ -600,13 +617,13 @@ results/t000001_sigma_1/
 | `gradient` | `(3,3,512,512,512)` | `float32` | 4.5 GiB |
 | `velocity_bar` | `(3,512,512,512)` | `float32` | 1.5 GiB |
 | `gradient_bar` | `(3,3,512,512,512)` | `float32` | 4.5 GiB |
-| `work_full` | `(512,512,512)` | `float32` | 0.5 GiB |
-| `work_resolved` | `(512,512,512)` | `float32` | 0.5 GiB |
-| `pi` | `(512,512,512)` | `float32` | 0.5 GiB |
-| `s_bar` | `(512,512,512)` | `float32` | 0.5 GiB |
+| `work_full` | `(1024,1024,1024)` | `float32` | 4 GiB |
+| `work_resolved` | `(1024,1024,1024)` | `float32` | 4 GiB |
+| `pi` | `(1024,1024,1024)` | `float32` | 4 GiB |
+| `s_bar` | `(1024,1024,1024)` | `float32` | 4 GiB |
 | `regime` | `(512,512,512)` | `uint8` | 0.125 GiB |
 
-单尺度未压缩合计约 14.125 GiB，另有 Zarr metadata 和文件系统开销。正式结果不打包、不分卷、不自动下载。
+单尺度未压缩合计约 28.125 GiB，另有 Zarr metadata、HTML 和文件系统开销。正式结果不打包、不分卷、不自动下载。
 
 ## 6. 失败恢复与当前边界
 
@@ -616,7 +633,9 @@ results/t000001_sigma_1/
 | 大 request 部分 tile 缺失 | 重新请求对应 `512^3` 大块，不生成第二份完整速度场 |
 | Interactive 浏览器关闭 | 已提交 Compute Job 继续运行 |
 | scratch run 超过配置生命周期 | `doctor` 拒绝继续信任，重新建立该帧缓存 |
-| `process-center` 中断 | 同参数重新运行该计算阶段；正式结果不受影响 |
+| `process-center` 中断 | 同参数重跑；有效的 filtered velocity checkpoint 会复用，正式结果不受影响 |
+| v2/v3 需要全域四场 | 运行 `backfill-full-fields`；复用 filtered workspace 或 raw cache，不自动 fetch |
+| `qa-sbar` 失败 | 保留全域数据和报告，检查 `s_bar_qa.json`，命令返回非零 |
 | 散度失败 | staging 保留诊断数据，不创建 `COMPLETE` |
 | `finalize-result` 前失败 | GUI 不显示 staging |
 | persistent 空间不足 | 停止新任务并核对 Quotas，不覆盖或静默删除正式结果 |

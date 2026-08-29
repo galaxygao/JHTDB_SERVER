@@ -9,10 +9,13 @@ import numpy as np
 from jhtdb_pipeline.dashboard import (
     _symmetric_color_limit,
     _symlog_transform,
+    _global_totals_figure,
     complete_result_paths,
     extract_gradient_slice,
     extract_scalar_slice,
     extract_slice,
+    full_index_to_crop,
+    spatial_axis_length,
 )
 
 
@@ -47,6 +50,28 @@ class DashboardTests(unittest.TestCase):
         np.testing.assert_array_equal(
             extract_gradient_slice(gradient, 1, 2, "z", 3), gradient[1, 2, 3, :, :]
         )
+        self.assertEqual(spatial_axis_length(vector, "x"), 6)
+        self.assertEqual(spatial_axis_length(vector, "y"), 5)
+        self.assertEqual(spatial_axis_length(vector, "z"), 4)
+
+    def test_full_index_maps_to_center_crop_only_when_present(self) -> None:
+        self.assertEqual(full_index_to_crop(256, "x", (256, 256, 256), (512, 512, 512)), 0)
+        self.assertEqual(full_index_to_crop(767, "z", (256, 256, 256), (512, 512, 512)), 511)
+        self.assertIsNone(full_index_to_crop(255, "y", (256, 256, 256), (512, 512, 512)))
+        self.assertIsNone(full_index_to_crop(768, "x", (256, 256, 256), (512, 512, 512)))
+
+    def test_global_totals_bar_order(self) -> None:
+        report = {
+            "scope": "full_domain",
+            "global_totals": {
+                "s_bar": 1.0,
+                "pi": 2.0,
+                "work_resolved": 3.0,
+                "work_full": 4.0,
+            },
+        }
+        figure = _global_totals_figure(report)
+        self.assertEqual(list(figure.data[0].y), [1.0, 2.0, 3.0, 4.0])
 
     def test_only_complete_persistent_results_are_listed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

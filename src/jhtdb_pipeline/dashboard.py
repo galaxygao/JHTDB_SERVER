@@ -21,6 +21,8 @@ REGIME_COLORS = [
     [0.60, "#2ca02c"], [0.799999, "#2ca02c"],
     [0.80, "#d62728"], [1.00, "#d62728"],
 ]
+GLOBAL_TOTAL_ORDER = ("s_bar", "pi", "work_resolved", "work_full")
+GLOBAL_TOTAL_LABELS = ("ΣS̄", "ΣΠ", "ΣW_res", "ΣW_full")
 
 
 def complete_result_paths(result_root: Path) -> list[Path]:
@@ -63,6 +65,28 @@ def extract_gradient_slice(
     if axis == "z":
         return np.asarray(array[velocity_component, derivative_component, index, :, :])
     raise ValueError(f"unknown axis {axis}")
+
+
+def spatial_axis_length(array, axis: str) -> int:
+    return int(array.shape[{"z": -3, "y": -2, "x": -1}[axis]])
+
+
+def full_index_to_crop(index: int, axis: str, crop_start, crop_shape) -> int | None:
+    component = {"x": 0, "y": 1, "z": 2}[axis]
+    local = index - int(crop_start[component])
+    return local if 0 <= local < int(crop_shape[component]) else None
+
+
+def _global_totals_figure(report: dict):
+    totals = report["global_totals"]
+    return go.Figure(
+        go.Bar(
+            x=list(GLOBAL_TOTAL_LABELS),
+            y=[totals[name] for name in GLOBAL_TOTAL_ORDER],
+            customdata=[totals[name] for name in GLOBAL_TOTAL_ORDER],
+            hovertemplate="%{x}: %{customdata:.8e}<extra></extra>",
+        )
+    ).update_layout(title=f"Global net totals ({report['scope']})")
 
 
 def _symmetric_color_limit(values: np.ndarray, percentile: float = 100.0) -> float:
@@ -179,7 +203,18 @@ def main() -> None:
         "页面", ("速度对比", "梯度对比", "Work 与 regime", "Π 与 S̄", "QA")
     )
     axis = st.sidebar.selectbox("切片法向", ("z", "y", "x"))
-    index = st.sidebar.slider("中心域切片 index", 0, result["work_full"].shape[0] - 1, result["work_full"].shape[0] // 2)
+    index = None
+    if page != "QA":
+        indexed_field = (
+            result["work_full"]
+            if page in ("Work 与 regime", "Π 与 S̄")
+            else result["velocity"]
+        )
+        length = spatial_axis_length(indexed_field, axis)
+        scope = "全域" if page in ("Work 与 regime", "Π 与 S̄") else "中心域"
+        index = st.sidebar.slider(
+            f"{scope}切片 index", 0, length - 1, length // 2
+        )
 
     if page == "速度对比":
         component = st.sidebar.selectbox(
@@ -234,11 +269,17 @@ def main() -> None:
     elif page == "Work 与 regime":
         full = extract_scalar_slice(result["work_full"], axis, index)
         resolved = extract_scalar_slice(result["work_resolved"], axis, index)
-        codes = extract_scalar_slice(result["regime"], axis, index)
         left, right = st.columns(2)
         left.plotly_chart(_continuous_figure(full, "work_full"), use_container_width=True)
         right.plotly_chart(_continuous_figure(resolved, "work_resolved"), use_container_width=True)
-        st.plotly_chart(_regime_figure(codes, "regime"), use_container_width=True)
+        regime_index = full_index_to_crop(
+            index, axis, cfg.crop_start, cfg.crop_shape
+        )
+        if regime_index is None:
+            st.info("当前全域切片位于中心 crop 之外，没有持久化 regime。")
+        else:
+            codes = extract_scalar_slice(result["regime"], axis, regime_index)
+            st.plotly_chart(_regime_figure(codes, "regime"), use_container_width=True)
         st.json(dict(result.attrs.get("occupancy", {})))
     elif page == "Π 与 S̄":
         if "pi" not in result or "s_bar" not in result:
@@ -264,6 +305,13 @@ def main() -> None:
             )
             st.json(dict(result.attrs.get("decomposition", {})))
     else:
+        s_bar_qa = selected / "s_bar_qa.json"
+        if s_bar_qa.is_file():
+            report = json.loads(s_bar_qa.read_text(encoding="utf-8"))
+            st.plotly_chart(
+                _global_totals_figure(report), use_container_width=True
+            )
+            st.json(report)
         for filename in ("manifest.json", "qa.json", "divergence.json", "COMPLETE"):
             path = selected / filename
             st.subheader(filename)

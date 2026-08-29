@@ -4,6 +4,7 @@ import unittest
 
 from jhtdb_pipeline.config import load_config
 from jhtdb_pipeline.planning import plan, requests_for, tiles_for, tiles_in_request
+from jhtdb_pipeline.processing import resource_plan
 
 
 class PlanningTests(unittest.TestCase):
@@ -43,6 +44,16 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(
             {tile.key for group in grouped for tile in group},
             {tile.key for tile in tiles},
+        )
+
+    def test_full_domain_energy_fields_are_in_persistent_capacity_plan(self):
+        resources = resource_plan(self.cfg)
+        self.assertEqual(resources["persistent_result_GiB"], 28.125)
+        self.assertEqual(resources["persistent_batch_GiB"], 84.375)
+        self.assertEqual(resources["persistent_v3_to_v4_peak_GiB"], 42.25)
+        self.assertGreater(
+            resources["persistent_batch_with_reserve_GiB"],
+            resources["observed_account_capacity_GiB"],
         )
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jhtdb-pipeline"
-version = "0.3.0"
+version = "0.4.0"
 description = "SciServer-only JHTDB full-periodic center pipeline"
 requires-python = ">=3.9"
 dependencies = [

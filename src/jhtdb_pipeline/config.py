@@ -9,7 +9,7 @@ from typing import Any, Mapping
 import yaml
 
 
-RESULT_SCHEMA_VERSION = 3
+RESULT_SCHEMA_VERSION = 4
 
 
 def _tuple3(value: Any, name: str) -> tuple[int, int, int]:
@@ -90,6 +90,9 @@ class PipelineConfig:
     crop_shape: tuple[int, int, int]
     divergence_relative_rms_max: float
     divergence_relative_max_max: float
+    energy_identity_rms_max: float
+    s_bar_rel_self_max: float
+    s_bar_vs_pi_net_max: float
     sigma_grid: float
     epsilon_abs: float
     epsilon_rel: float
@@ -151,14 +154,22 @@ class PipelineConfig:
         return nz, ny, nx
 
     @property
+    def full_shape_zyx(self) -> tuple[int, int, int]:
+        nx, ny, nz = self.grid_shape
+        return nz, ny, nx
+
+    @property
     def bytes_per_snapshot(self) -> int:
         nx, ny, nz = self.grid_shape
         return nx * ny * nz * 3 * 4
 
     @property
     def result_uncompressed_bytes(self) -> int:
-        points = int(self.crop_shape[0] * self.crop_shape[1] * self.crop_shape[2])
-        return points * (3 + 9 + 3 + 9 + 1 + 1 + 1 + 1) * 4 + points
+        center_points = int(self.crop_shape[0] * self.crop_shape[1] * self.crop_shape[2])
+        full_points = int(self.grid_shape[0] * self.grid_shape[1] * self.grid_shape[2])
+        center_fields = center_points * (3 + 9 + 3 + 9) * 4 + center_points
+        full_fields = full_points * 4 * 4
+        return center_fields + full_fields
 
     def physical_time(self, time_index: int) -> float:
         if time_index < 1:
@@ -210,6 +221,12 @@ class PipelineConfig:
         if self.divergence_relative_rms_max <= 0 or self.divergence_relative_max_max <= 0:
             raise ValueError("divergence tolerances must be positive")
         if (
+            self.energy_identity_rms_max <= 0
+            or self.s_bar_rel_self_max <= 0
+            or self.s_bar_vs_pi_net_max <= 0
+        ):
+            raise ValueError("S_bar QA tolerances must be positive")
+        if (
             not self.sigma_grids
             or self.sigma_grid != self.sigma_grids[0]
             or any(not math.isfinite(item) or item <= 0 for item in self.sigma_grids)
@@ -245,7 +262,7 @@ def load_config(path: str | Path) -> PipelineConfig:
     _reject_unknown(auth, {"token_file"}, "auth")
     _reject_unknown(jhtdb, {"request_shape", "tile_shape", "retries", "backoff_seconds", "request_cooldown_seconds"}, "jhtdb")
     _reject_unknown(storage, {"compression_level", "compression_threads", "persistent_capacity_gb_observed", "persistent_safety_reserve_gib", "scratch_safety_reserve_gib"}, "storage")
-    _reject_unknown(validation, {"divergence_relative_rms_max", "divergence_relative_max_max"}, "validation")
+    _reject_unknown(validation, {"divergence_relative_rms_max", "divergence_relative_max_max", "energy_identity_rms_max", "s_bar_rel_self_max", "s_bar_vs_pi_net_max"}, "validation")
     _reject_unknown(physics, {"sigma_grid", "crop_start", "crop_shape", "epsilon_abs", "epsilon_rel", "fft_workers", "fft_slab_width", "cleanup_scratch_on_success"}, "physics")
 
     token_value = auth.get("token_file")
@@ -275,6 +292,9 @@ def load_config(path: str | Path) -> PipelineConfig:
         crop_shape=_tuple3(physics.get("crop_shape", [512, 512, 512]), "physics.crop_shape"),
         divergence_relative_rms_max=float(validation.get("divergence_relative_rms_max", 1.0e-4)),
         divergence_relative_max_max=float(validation.get("divergence_relative_max_max", 1.0e-3)),
+        energy_identity_rms_max=float(validation.get("energy_identity_rms_max", 1.0e-4)),
+        s_bar_rel_self_max=float(validation.get("s_bar_rel_self_max", 1.0e-4)),
+        s_bar_vs_pi_net_max=float(validation.get("s_bar_vs_pi_net_max", 1.0e-2)),
         sigma_grid=sigma_grids[0],
         epsilon_abs=float(physics.get("epsilon_abs", 0.0)),
         epsilon_rel=float(physics.get("epsilon_rel", 0.001)),

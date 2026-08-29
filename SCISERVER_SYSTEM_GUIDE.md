@@ -105,10 +105,10 @@ persistent 用于：
 
 - 项目代码和 `.venv`；
 - SQLite catalog、输入 manifest、QA、锁和日志；
-- `results/.staging` 中尚未正式提交的中心结果；
+- `results/.staging` 中尚未正式提交的中心字段与全域能量场；
 - `results/<result_id>` 中带 `COMPLETE` 的权威结果。
 
-persistent 不保存完整 `1024^3` 速度缓存或全域 FFT 工作场。单尺度中心正式结果未压缩约 14.125 GiB，配置另保留至少 15 GiB 安全余量。
+persistent 不保存完整 `1024^3` 原始速度缓存或全域 FFT 工作场，但保存四个 `1024^3` 全域能量场。schema v4 单尺度正式结果未压缩约 28.125 GiB，配置另保留至少 15 GiB 安全余量；三个尺度约 84.375 GiB，提交前必须结合 Quotas 决定是否只保留部分尺度或扩容。
 
 ### 3.7 scratch / Temporary
 
@@ -160,6 +160,8 @@ JHTDB velocity
   → tile 覆盖、SHA-256 回读、shape/dtype/有限值验证
   → 在完整 1024^3 周期域上做谱导数和谱高斯滤波
   → 原始速度与滤波速度的全域无散度 QA
+  → W_full/W_res/Π/S̄ 写入 persistent 全域数组
+  → 独立 S̄ 三层 QA 与四场净总量柱状图
   → 裁剪 x,y,z = [256,768)
   → 写入 persistent staging
   → 输出字段逐数组校验和散列
@@ -322,7 +324,7 @@ doctor → cache/validate-input → process-center → finalize-result
 
 - 已验证的 `128^3` tile 会回读 SHA-256 后跳过；某个 `512^3` request 仍有缺块时只重新请求该大块；
 - 谱处理若中断，会清理同一 result 的旧 staging/workspace 并从处理阶段开头重算；
-- 已存在且带 `COMPLETE` 的相同 `time_index + sigma_grid` 当前结果不会被覆盖；缺少 `pi/s_bar` 的旧结果会在新版 staging 完成并通过校验后被替换；
+- 已存在且带 `COMPLETE` 的相同 `time_index + sigma_grid` 当前 v4 结果不会被覆盖；v2/v3 结果仅在全域 backfill、中心重叠和新版 staging 校验全部通过后被替换；
 - 失败的 staging 不会出现在 GUI 正式结果列表中。
 
 查看状态：
@@ -345,7 +347,9 @@ python -m jhtdb_pipeline status --config configs/pipeline.yaml
 | `validate-input --time-index N` | 重新验证完整输入缓存 |
 | `process-center --time-index N --sigma-grid S` | 全域谱处理并写 persistent staging |
 | `finalize-result --time-index N --sigma-grid S` | 校验 staging 并提交正式结果 |
-| `upgrade-result --time-index N --sigma-grid S` | 用已有中心 `gradient_bar` 检查滤波散度并将完整 v2 结果升级为 v3，无需重算 |
+| `backfill-full-fields --time-index N --sigma-grid S` | 复用 filtered workspace 或 raw cache，把 v2/v3 补算为全域 v4；不自动 fetch |
+| `qa-sbar --time-index N --sigma-grid S` | 从 v4 全域四场重算 S̄ 三层 QA 和柱状图 |
+| `upgrade-result --time-index N --sigma-grid S` | `backfill-full-fields` 的兼容别名 |
 | `single-frame --time-index N [--sigma-grid S]` | 串联完整流程；默认批量处理配置列表，指定参数时只跑一个尺度 |
 | `status` | 列出输入和正式/非正式结果状态 |
 | `gui` | 启动只读服务器 GUI |

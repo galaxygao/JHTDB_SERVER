@@ -24,6 +24,15 @@ class CliBatchTests(unittest.TestCase):
         self.assertEqual(args.time_index, 7)
         self.assertEqual(args.sigma_grid, 2.0)
 
+    def test_backfill_and_sbar_qa_commands_accept_frame_and_sigma(self) -> None:
+        for command in ("backfill-full-fields", "qa-sbar"):
+            args = build_parser().parse_args(
+                [command, "--time-index", "7", "--sigma-grid", "2.0"]
+            )
+            self.assertEqual(args.command, command)
+            self.assertEqual(args.time_index, 7)
+            self.assertEqual(args.sigma_grid, 2.0)
+
     @patch("jhtdb_pipeline.cli.finalize_result")
     @patch("jhtdb_pipeline.cli.process_center")
     @patch("jhtdb_pipeline.cli.validate_snapshot")

@@ -13,7 +13,14 @@ from .config import load_config
 from .doctor import doctor
 from .jhtdb import fetch_snapshot, smoke
 from .planning import plan
-from .processing import finalize_result, process_center, resource_plan, upgrade_result
+from .processing import (
+    backfill_full_fields,
+    finalize_result,
+    process_center,
+    resource_plan,
+    upgrade_result,
+)
+from .sbar_qa import run_sbar_qa
 from .validation import validate_snapshot
 
 
@@ -54,7 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             _config(command)
 
-    for name in ("process-center", "finalize-result", "single-frame", "upgrade-result"):
+    for name in (
+        "process-center",
+        "finalize-result",
+        "single-frame",
+        "upgrade-result",
+        "backfill-full-fields",
+        "qa-sbar",
+    ):
         command = commands.add_parser(name)
         _frame(command)
         _sigma(command)
@@ -88,6 +102,8 @@ def _status(cfg) -> dict[str, object]:
                         "time_index": manifest.get("time_index"),
                         "sigma_grid": manifest.get("sigma_grid"),
                         "manifest_status": manifest.get("status"),
+                        "schema_version": manifest.get("schema_version"),
+                        "s_bar_qa_passed": manifest.get("s_bar_qa_passed"),
                     }
                 )
             results.append(item)
@@ -173,6 +189,26 @@ def main(argv: list[str] | None = None) -> int:
                     for sigma in _selected_sigmas(cfg, args.sigma_grid)
                 ]
             )
+        elif args.command == "backfill-full-fields":
+            _print_paths(
+                [
+                    backfill_full_fields(cfg, args.time_index, sigma)
+                    for sigma in _selected_sigmas(cfg, args.sigma_grid)
+                ]
+            )
+        elif args.command == "qa-sbar":
+            reports = [
+                run_sbar_qa(cfg, args.time_index, sigma)
+                for sigma in _selected_sigmas(cfg, args.sigma_grid)
+            ]
+            print(
+                json.dumps(
+                    reports[0] if len(reports) == 1 else reports,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0 if all(report["passed"] for report in reports) else 2
         elif args.command == "single-frame":
             _print_paths(_run_single_frame(cfg, args.time_index, args.sigma_grid))
         elif args.command == "status":

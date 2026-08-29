@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
@@ -14,7 +15,14 @@ from jhtdb_pipeline.catalog import Catalog
 from jhtdb_pipeline.config import load_config, result_zarr_name
 from jhtdb_pipeline.physics import spectral_derivative, spectral_gaussian
 from jhtdb_pipeline.planning import Tile
-from jhtdb_pipeline.processing import finalize_result, process_center, resource_plan
+from jhtdb_pipeline.sbar_qa import run_sbar_qa
+from jhtdb_pipeline.processing import (
+    backfill_full_fields,
+    filter_field as processing_filter_field,
+    finalize_result,
+    process_center,
+    resource_plan,
+)
 from jhtdb_pipeline.store import VelocityStore, open_complete_result
 from jhtdb_pipeline.validation import atomic_json
 
@@ -62,9 +70,15 @@ class ProcessingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             cfg, velocity = fixture(Path(temporary))
             plan = resource_plan(cfg)
-            self.assertEqual(plan["persistent_result_GiB"], 512 * 113 / 1024**3)
+            expected_result_bytes = 8**3 * 97 + 16**3 * 16
+            self.assertEqual(
+                plan["persistent_result_GiB"], expected_result_bytes / 1024**3
+            )
             self.assertEqual(plan["configured_sigma_count"], 3)
-            self.assertEqual(plan["persistent_batch_GiB"], 3 * 512 * 113 / 1024**3)
+            self.assertEqual(
+                plan["persistent_batch_GiB"],
+                3 * expected_result_bytes / 1024**3,
+            )
             staging = process_center(cfg, 1)
             self.assertTrue((staging / result_zarr_name(cfg.sigma_grid)).is_dir())
             divergence = json.loads(
@@ -76,9 +90,14 @@ class ProcessingTests(unittest.TestCase):
             final = finalize_result(cfg, 1)
             self.assertTrue((final / "COMPLETE").is_file())
             self.assertTrue((final / "manifest.json").is_file())
+            self.assertTrue((final / "s_bar_qa.json").is_file())
+            self.assertTrue((final / "s_bar_global_totals.html").is_file())
+            self.assertEqual(run_sbar_qa(cfg, 1)["scope"], "full_domain")
             result = open_complete_result(final)
             self.assertEqual(result["velocity"].shape, (3, 8, 8, 8))
             self.assertEqual(result["gradient"].shape, (3, 3, 8, 8, 8))
+            self.assertEqual(result["work_full"].shape, (16, 16, 16))
+            self.assertEqual(result["regime"].shape, (8, 8, 8))
             crop = (slice(4, 12), slice(4, 12), slice(4, 12))
             np.testing.assert_allclose(result["velocity"][0], velocity[(0,) + crop])
             expected_filtered = spectral_gaussian(velocity[0], cfg.sigma_grid)[crop]
@@ -123,10 +142,10 @@ class ProcessingTests(unittest.TestCase):
                 for j in range(3)
             )
             np.testing.assert_allclose(
-                result["pi"][:], expected_pi[crop], rtol=3e-5, atol=3e-6
+                result["pi"][:], expected_pi, rtol=3e-5, atol=3e-6
             )
             np.testing.assert_allclose(
-                result["s_bar"][:], expected_s_bar[crop], rtol=3e-5, atol=3e-6
+                result["s_bar"][:], expected_s_bar, rtol=3e-5, atol=3e-6
             )
             np.testing.assert_allclose(
                 result["work_full"][:],
@@ -137,7 +156,14 @@ class ProcessingTests(unittest.TestCase):
             self.assertFalse(cfg.workspace_path(1).exists())
             self.assertFalse(any(final.rglob("*.part-*")))
             manifest = json.loads((final / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(manifest["schema_version"], 4)
+            self.assertIn("s_bar_qa_report_hash", manifest)
+            self.assertEqual(
+                json.loads((final / "COMPLETE").read_text(encoding="utf-8"))[
+                    "manifest_hash"
+                ],
+                result.attrs["manifest_hash"],
+            )
             self.assertEqual(set(manifest["fields"]), {
                 "velocity", "gradient", "velocity_bar", "gradient_bar",
                 "work_full", "work_resolved", "pi", "s_bar", "regime",
@@ -162,66 +188,94 @@ class ProcessingTests(unittest.TestCase):
             self.assertTrue((final / result_zarr_name(cfg.sigma_grid)).is_dir())
             self.assertIn("pi", open_complete_result(final))
 
-    def test_complete_v2_result_upgrades_from_stored_gradient(self) -> None:
+    def test_backfill_reuses_validated_filtered_velocity_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg, _ = fixture(Path(temporary))
+            cfg = replace(cfg, cleanup_scratch_on_success=False)
+            process_center(cfg, 1)
+            final = finalize_result(cfg, 1)
+            root = zarr.open_group(
+                str(final / result_zarr_name(cfg.sigma_grid)), mode="a"
+            )
+            root.attrs["result_schema_version"] = 3
+
+            with patch(
+                "jhtdb_pipeline.processing.filter_field",
+                wraps=processing_filter_field,
+            ) as filtered:
+                staging = process_center(cfg, 1)
+
+            qa = json.loads((staging / "qa.json").read_text(encoding="utf-8"))
+            self.assertTrue(qa["reuse"]["filtered_velocity"])
+            self.assertEqual(filtered.call_count, 9)
+
+    def test_v3_backfill_reuses_raw_cache_and_validates_center_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cfg, _ = fixture(Path(temporary))
             process_center(cfg, 1)
             final = finalize_result(cfg, 1)
             zarr_path = final / result_zarr_name(cfg.sigma_grid)
-            root = zarr.open_group(str(zarr_path), mode="a")
-
-            divergence = json.loads(
-                (final / "divergence.json").read_text(encoding="utf-8")
-            )
-            v2_divergence = dict(divergence["unfiltered"])
-            v2_divergence.pop("scope")
-            qa = json.loads((final / "qa.json").read_text(encoding="utf-8"))
-            qa["divergence"] = v2_divergence
-            manifest = json.loads(
-                (final / "manifest.json").read_text(encoding="utf-8")
-            )
-            manifest["schema_version"] = 2
-            manifest.pop("divergence_validation_scope", None)
-            atomic_json(final / "divergence.json", v2_divergence)
-            atomic_json(final / "qa.json", qa)
-            manifest_hash = atomic_json(final / "manifest.json", manifest)
-            root.attrs.update(
-                {"result_schema_version": 2, "manifest_hash": manifest_hash}
-            )
-            if "divergence_validation_scope" in root.attrs:
-                del root.attrs["divergence_validation_scope"]
-            atomic_json(final / "COMPLETE", {"manifest_hash": manifest_hash})
-
-            with patch(
-                "jhtdb_pipeline.processing.filter_field",
-                side_effect=AssertionError("upgrade must not rerun filtering"),
+            current = zarr.open_group(str(zarr_path), mode="r")
+            crop = cfg.crop_slices_zyx
+            old_fields = {}
+            for name in (
+                "velocity",
+                "gradient",
+                "velocity_bar",
+                "gradient_bar",
+                "regime",
             ):
-                upgraded = process_center(cfg, 1)
+                old_fields[name] = np.asarray(current[name][:])
+            for name in ("work_full", "work_resolved", "pi", "s_bar"):
+                old_fields[name] = np.asarray(current[name][crop])
+            del current
+
+            old = zarr.open_group(str(zarr_path), mode="w")
+            old.attrs.update(
+                {
+                    "status": "complete",
+                    "result_schema_version": 3,
+                    "sigma_grid": cfg.sigma_grid,
+                }
+            )
+            for name, values in old_fields.items():
+                old.create_dataset(
+                    name,
+                    data=values,
+                    chunks=tuple(min(4, size) for size in values.shape),
+                    dtype=values.dtype,
+                )
+            atomic_json(
+                final / "manifest.json",
+                {"schema_version": 3, "time_index": 1, "sigma_grid": 1.0},
+            )
+
+            upgraded = backfill_full_fields(cfg, 1)
 
             self.assertEqual(upgraded, final)
-            self.assertFalse(cfg.workspace_path(1).exists())
-            upgraded_root = zarr.open_group(str(zarr_path), mode="r")
-            self.assertEqual(upgraded_root.attrs["result_schema_version"], 3)
-            upgraded_divergence = json.loads(
-                (final / "divergence.json").read_text(encoding="utf-8")
+            result = open_complete_result(final)
+            self.assertEqual(result.attrs["result_schema_version"], 4)
+            self.assertEqual(result["work_full"].shape, cfg.full_shape_zyx)
+            qa = json.loads((final / "qa.json").read_text(encoding="utf-8"))
+            overlap = qa["reuse"]["previous_center_overlap"]
+            self.assertTrue(overlap["passed"])
+            self.assertEqual(overlap["scope"], "stored_center_crop")
+
+    def test_backfill_never_fetches_when_temporary_raw_cache_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg, _ = fixture(Path(temporary))
+            final = cfg.result_path(1)
+            final.mkdir(parents=True)
+            atomic_json(final / "COMPLETE", {})
+            atomic_json(
+                final / "manifest.json",
+                {"schema_version": 3, "time_index": 1, "sigma_grid": 1.0},
             )
-            self.assertTrue(upgraded_divergence["passed"])
-            self.assertEqual(
-                upgraded_divergence["unfiltered"]["scope"], "full_domain"
-            )
-            self.assertEqual(
-                upgraded_divergence["filtered"]["scope"], "stored_center_crop"
-            )
-            upgraded_manifest = json.loads(
-                (final / "manifest.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(upgraded_manifest["schema_version"], 3)
-            self.assertEqual(
-                json.loads((final / "COMPLETE").read_text(encoding="utf-8"))[
-                    "manifest_hash"
-                ],
-                upgraded_root.attrs["manifest_hash"],
-            )
+            raw_store = cfg.raw_store_path(1)
+            shutil.rmtree(raw_store)
+
+            with self.assertRaisesRegex(RuntimeError, "never fetches JHTDB"):
+                backfill_full_fields(cfg, 1)
 
     def test_divergence_failure_never_creates_complete_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
