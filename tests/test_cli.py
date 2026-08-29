@@ -25,7 +25,7 @@ class CliBatchTests(unittest.TestCase):
         self.assertEqual(args.sigma_grid, 2.0)
 
     def test_backfill_and_sbar_qa_commands_accept_frame_and_sigma(self) -> None:
-        for command in ("backfill-full-fields", "qa-sbar"):
+        for command in ("backfill-full-fields", "backfill-full-regime", "qa-sbar"):
             args = build_parser().parse_args(
                 [command, "--time-index", "7", "--sigma-grid", "2.0"]
             )
@@ -38,9 +38,11 @@ class CliBatchTests(unittest.TestCase):
     @patch("jhtdb_pipeline.cli.validate_snapshot")
     @patch("jhtdb_pipeline.cli.fetch_snapshot")
     @patch("jhtdb_pipeline.cli.doctor")
+    @patch("jhtdb_pipeline.cli.reuse_or_backfill_result")
     def test_single_frame_fetches_once_and_processes_each_sigma(
-        self, doctor, fetch, validate, process, finalize
+        self, reuse, doctor, fetch, validate, process, finalize
     ) -> None:
+        reuse.return_value = None
         doctor.return_value = {"status": "ok"}
         finalize.side_effect = lambda cfg, frame, sigma: Path(
             f"result_sigma_{sigma:g}"
@@ -59,6 +61,31 @@ class CliBatchTests(unittest.TestCase):
         self.assertEqual(
             results,
             [Path("result_sigma_1"), Path("result_sigma_2"), Path("result_sigma_3")],
+        )
+
+    @patch("jhtdb_pipeline.cli.validate_snapshot")
+    @patch("jhtdb_pipeline.cli.fetch_snapshot")
+    @patch("jhtdb_pipeline.cli.doctor")
+    @patch("jhtdb_pipeline.cli.reuse_or_backfill_result")
+    def test_single_frame_fast_upgrades_existing_results_without_fetch(
+        self, reuse, doctor, fetch, validate
+    ) -> None:
+        reuse.side_effect = lambda cfg, frame, sigma: Path(
+            f"upgraded_sigma_{sigma:g}"
+        )
+
+        results = _run_single_frame(self.cfg, 1, None)
+
+        doctor.assert_not_called()
+        fetch.assert_not_called()
+        validate.assert_not_called()
+        self.assertEqual(
+            results,
+            [
+                Path("upgraded_sigma_1"),
+                Path("upgraded_sigma_2"),
+                Path("upgraded_sigma_3"),
+            ],
         )
 
 

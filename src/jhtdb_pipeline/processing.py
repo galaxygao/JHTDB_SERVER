@@ -42,18 +42,39 @@ RESULT_FIELDS = {
 }
 
 
-def _complete_result_is_current(path: Path, sigma_grid: float) -> bool:
+def _complete_result_schema(path: Path, sigma_grid: float) -> int | None:
     if not (path / "COMPLETE").is_file():
-        return False
+        return None
     zarr_path = path / result_zarr_name(sigma_grid)
     if not zarr_path.is_dir():
-        return False
+        return None
     try:
         root = zarr.open_group(str(zarr_path), mode="r")
+        if root.attrs.get("status") != "complete" or any(
+            name not in root for name in RESULT_FIELDS
+        ):
+            return None
+        return int(root.attrs.get("result_schema_version"))
+    except Exception:
+        return None
+
+
+def _complete_result_is_current(
+    cfg: PipelineConfig, path: Path, sigma_grid: float
+) -> bool:
+    if _complete_result_schema(path, sigma_grid) != RESULT_SCHEMA_VERSION:
+        return False
+    try:
+        root = zarr.open_group(str(path / result_zarr_name(sigma_grid)), mode="r")
         return (
-            root.attrs.get("status") == "complete"
-            and root.attrs.get("result_schema_version") == RESULT_SCHEMA_VERSION
-            and all(name in root for name in RESULT_FIELDS)
+            tuple(root["velocity"].shape) == (3, *cfg.result_shape_zyx)
+            and tuple(root["gradient"].shape) == (3, 3, *cfg.result_shape_zyx)
+            and tuple(root["velocity_bar"].shape) == (3, *cfg.result_shape_zyx)
+            and tuple(root["gradient_bar"].shape) == (3, 3, *cfg.result_shape_zyx)
+            and all(
+                tuple(root[name].shape) == cfg.full_shape_zyx
+                for name in ("work_full", "work_resolved", "pi", "s_bar", "regime")
+            )
         )
     except Exception:
         return False
@@ -284,12 +305,90 @@ def _validate_previous_center_overlap(
             maximum[name] = max(maximum[name], difference)
             if not np.allclose(expected, actual, rtol=5.0e-5, atol=5.0e-6):
                 raise RuntimeError(
-                    f"schema-v4 center overlap differs from existing {name}"
+                    f"current-schema center overlap differs from existing {name}"
                 )
     return {
         "passed": True,
         "scope": "stored_center_crop",
         "maximum_abs_difference": maximum,
+    }
+
+
+def _write_full_regime(
+    work_full: Any,
+    work_resolved: Any,
+    regime: Any,
+    cfg: PipelineConfig,
+) -> dict[str, Any]:
+    expected = cfg.full_shape_zyx
+    if (
+        tuple(work_full.shape) != expected
+        or tuple(work_resolved.shape) != expected
+        or tuple(regime.shape) != expected
+    ):
+        raise RuntimeError("full-domain regime inputs and output must share the full shape")
+    chunks = tuple(int(value) for value in regime.chunks)
+    chunk_count = int(
+        np.prod(
+            [
+                (size + chunk - 1) // chunk
+                for size, chunk in zip(expected, chunks)
+            ],
+            dtype=np.int64,
+        )
+    )
+    full_sumsq = 0.0
+    resolved_sumsq = 0.0
+    point_count = 0
+    console = Console()
+    with Progress(
+        SpinnerColumn("line"),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        "{task.completed}/{task.total}",
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("full-domain regime", total=2 * chunk_count)
+        for key in _spatial_keys(expected, chunks):
+            full = np.asarray(work_full[key], dtype=np.float32)
+            resolved = np.asarray(work_resolved[key], dtype=np.float32)
+            if not np.all(np.isfinite(full)) or not np.all(np.isfinite(resolved)):
+                raise ValueError("work fields contain NaN or Inf")
+            full_sumsq += float(np.square(full, dtype=np.float64).sum())
+            resolved_sumsq += float(np.square(resolved, dtype=np.float64).sum())
+            point_count += full.size
+            progress.advance(task)
+        epsilon_full = max(
+            cfg.epsilon_abs,
+            cfg.epsilon_rel * float(np.sqrt(full_sumsq / point_count)),
+        )
+        epsilon_resolved = max(
+            cfg.epsilon_abs,
+            cfg.epsilon_rel * float(np.sqrt(resolved_sumsq / point_count)),
+        )
+        occupancy = np.zeros(5, dtype=np.int64)
+        for key in _spatial_keys(expected, chunks):
+            full = np.asarray(work_full[key], dtype=np.float32)
+            resolved = np.asarray(work_resolved[key], dtype=np.float32)
+            codes = np.zeros(full.shape, dtype=np.uint8)
+            codes[(full > epsilon_full) & (resolved > epsilon_resolved)] = 1
+            codes[(full > epsilon_full) & (resolved < -epsilon_resolved)] = 2
+            codes[(full < -epsilon_full) & (resolved > epsilon_resolved)] = 3
+            codes[(full < -epsilon_full) & (resolved < -epsilon_resolved)] = 4
+            regime[key] = codes
+            occupancy += np.bincount(codes.ravel(), minlength=5)
+            progress.advance(task)
+    occupancy_fraction = {
+        "uncertain" if index == 0 else f"Q{index}": float(value / point_count)
+        for index, value in enumerate(occupancy)
+    }
+    return {
+        "scope": "full_domain",
+        "point_count": point_count,
+        "epsilon_full": float(epsilon_full),
+        "epsilon_resolved": float(epsilon_resolved),
+        "occupancy": occupancy_fraction,
     }
 
 
@@ -301,6 +400,7 @@ def resource_plan(cfg: PipelineConfig) -> dict[str, float]:
     # + two filter buffers.
     workspace_bytes = 10 * scalar_bytes
     legacy_result_bytes = center_points * 113
+    schema_v4_result_bytes = center_points * 97 + full_points * 16
     batch_result_bytes = len(cfg.sigma_grids) * cfg.result_uncompressed_bytes
     return {
         "velocity_cache_GiB": cfg.bytes_per_snapshot / 1024**3,
@@ -312,8 +412,12 @@ def resource_plan(cfg: PipelineConfig) -> dict[str, float]:
             batch_result_bytes / 1024**3
         ),
         "persistent_v3_result_GiB": legacy_result_bytes / 1024**3,
-        "persistent_v3_to_v4_peak_GiB": (
+        "persistent_v3_to_v5_peak_GiB": (
             legacy_result_bytes + cfg.result_uncompressed_bytes
+        )
+        / 1024**3,
+        "persistent_v4_regime_backfill_peak_GiB": (
+            schema_v4_result_bytes + full_points
         )
         / 1024**3,
         "persistent_batch_with_reserve_GiB": (
@@ -375,10 +479,11 @@ def process_center(
     sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
     if sigma <= 0:
         raise ValueError("sigma_grid must be positive")
-    manifest_hash = input_manifest_hash(cfg, time_index)
     final = cfg.result_path(time_index, sigma)
-    if _complete_result_is_current(final, sigma):
-        return final
+    existing = reuse_or_backfill_result(cfg, time_index, sigma)
+    if existing is not None:
+        return existing
+    manifest_hash = input_manifest_hash(cfg, time_index)
     _preflight_result_space(cfg)
     _preflight_workspace_space(cfg, time_index)
 
@@ -405,7 +510,7 @@ def process_center(
         {
             "input_manifest_hash": manifest_hash,
             "result_schema_version": RESULT_SCHEMA_VERSION,
-            "algorithm": "full_periodic_spectral_pi_sbar_v4",
+            "algorithm": "full_periodic_spectral_pi_sbar_regime_v5",
             "pi_definition": "tau_ij * d_j(velocity_bar_i)",
             "pi_sign_convention": "Equation (2): W_full = W_resolved - pi + s_bar",
             "s_bar_definition": "d_j(velocity_bar_i * tau_ij)",
@@ -753,36 +858,9 @@ def process_center(
         "residual_maximum_abs": identity_metric["maximum_abs"],
     }
 
-    full_sumsq = 0.0
-    resolved_sumsq = 0.0
-    center_count = 0
-    regime_chunks = tuple(int(value) for value in result["regime"].chunks)
-    for relative in _spatial_keys(cfg.result_shape_zyx, regime_chunks):
-        source = _source_key(cfg, relative)
-        full = np.asarray(result["work_full"][source], dtype=np.float32)
-        resolved = np.asarray(result["work_resolved"][source], dtype=np.float32)
-        full_sumsq += float(np.square(full, dtype=np.float64).sum())
-        resolved_sumsq += float(np.square(resolved, dtype=np.float64).sum())
-        center_count += full.size
-    epsilon_full = max(
-        cfg.epsilon_abs, cfg.epsilon_rel * np.sqrt(full_sumsq / center_count)
+    regime_report = _write_full_regime(
+        result["work_full"], result["work_resolved"], result["regime"], cfg
     )
-    epsilon_resolved = max(
-        cfg.epsilon_abs,
-        cfg.epsilon_rel * np.sqrt(resolved_sumsq / center_count),
-    )
-    occupancy = np.zeros(5, dtype=np.int64)
-    for relative in _spatial_keys(cfg.result_shape_zyx, regime_chunks):
-        source = _source_key(cfg, relative)
-        full = np.asarray(result["work_full"][source], dtype=np.float32)
-        resolved = np.asarray(result["work_resolved"][source], dtype=np.float32)
-        codes = np.zeros(full.shape, dtype=np.uint8)
-        codes[(full > epsilon_full) & (resolved > epsilon_resolved)] = 1
-        codes[(full > epsilon_full) & (resolved < -epsilon_resolved)] = 2
-        codes[(full < -epsilon_full) & (resolved > epsilon_resolved)] = 3
-        codes[(full < -epsilon_full) & (resolved < -epsilon_resolved)] = 4
-        result["regime"][relative] = codes
-        occupancy += np.bincount(codes.ravel(), minlength=5)
 
     qa = {
         "dataset": cfg.dataset,
@@ -802,20 +880,20 @@ def process_center(
             "filtered_velocity": reused_filtered_velocity,
             "previous_center_overlap": overlap_report,
         },
-        "epsilon_full": float(epsilon_full),
-        "epsilon_resolved": float(epsilon_resolved),
-        "occupancy": {
-            "uncertain" if index == 0 else f"Q{index}": float(value / occupancy.sum())
-            for index, value in enumerate(occupancy)
-        },
+        "epsilon_full": regime_report["epsilon_full"],
+        "epsilon_resolved": regime_report["epsilon_resolved"],
+        "regime_scope": regime_report["scope"],
+        "regime_point_count": regime_report["point_count"],
+        "occupancy": regime_report["occupancy"],
     }
     atomic_json(staging / "qa.json", qa)
     result.attrs.update(
         {
             "status": "processed",
-            "epsilon_full": float(epsilon_full),
-            "epsilon_resolved": float(epsilon_resolved),
+            "epsilon_full": regime_report["epsilon_full"],
+            "epsilon_resolved": regime_report["epsilon_resolved"],
             "occupancy": qa["occupancy"],
+            "regime_scope": regime_report["scope"],
             "decomposition": decomposition_report,
             "s_bar_qa_passed": s_bar_report["passed"],
             "s_bar_qa_report_hash": s_bar_report_hash,
@@ -833,8 +911,9 @@ def finalize_result(
     sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
     staging = cfg.staging_result_path(time_index, sigma)
     final = cfg.result_path(time_index, sigma)
-    if _complete_result_is_current(final, sigma):
-        return final
+    existing = reuse_or_backfill_result(cfg, time_index, sigma)
+    if existing is not None:
+        return existing
     if not staging.is_dir():
         raise RuntimeError("persistent result staging directory is missing")
     root = zarr.open_group(str(staging / result_zarr_name(sigma)), mode="a")
@@ -850,7 +929,7 @@ def finalize_result(
         "work_resolved": cfg.full_shape_zyx,
         "pi": cfg.full_shape_zyx,
         "s_bar": cfg.full_shape_zyx,
-        "regime": cfg.result_shape_zyx,
+        "regime": cfg.full_shape_zyx,
     }
     fields: dict[str, Any] = {}
     for name, (dtype, rank) in RESULT_FIELDS.items():
@@ -917,15 +996,219 @@ def finalize_result(
     return final
 
 
+_REGIME_STAGING_NAME = "_regime_full_v5_staging"
+_REGIME_BACKUP_NAME = "_regime_center_v4_backup"
+_REGIME_UPGRADE_FILES = {
+    "manifest.json": ".manifest.regime-v4-backup.json",
+    "qa.json": ".qa.regime-v4-backup.json",
+    "COMPLETE": ".COMPLETE.regime-v4-backup",
+}
+_REGIME_ATTRS_BACKUP = ".zattrs.regime-v4-backup.json"
+
+
+def _recover_or_cleanup_regime_upgrade(
+    cfg: PipelineConfig,
+    result_dir: Path,
+    sigma: float,
+) -> None:
+    zarr_path = result_dir / result_zarr_name(sigma)
+    if not zarr_path.is_dir():
+        return
+    root = zarr.open_group(str(zarr_path), mode="a")
+    backups_exist = any(
+        (result_dir / backup).is_file()
+        for backup in (*_REGIME_UPGRADE_FILES.values(), _REGIME_ATTRS_BACKUP)
+    ) or _REGIME_BACKUP_NAME in root
+    if not backups_exist:
+        return
+    if _complete_result_is_current(cfg, result_dir, sigma):
+        for name in (_REGIME_STAGING_NAME, _REGIME_BACKUP_NAME):
+            if name in root:
+                del root[name]
+        for backup in (*_REGIME_UPGRADE_FILES.values(), _REGIME_ATTRS_BACKUP):
+            (result_dir / backup).unlink(missing_ok=True)
+        return
+
+    if _REGIME_BACKUP_NAME in root:
+        if "regime" in root:
+            del root["regime"]
+        root.move(_REGIME_BACKUP_NAME, "regime")
+    if _REGIME_STAGING_NAME in root:
+        del root[_REGIME_STAGING_NAME]
+    attrs_backup = result_dir / _REGIME_ATTRS_BACKUP
+    if attrs_backup.is_file():
+        original_attrs = json.loads(attrs_backup.read_text(encoding="utf-8"))
+        root.attrs.clear()
+        root.attrs.update(original_attrs)
+    for original, backup in _REGIME_UPGRADE_FILES.items():
+        backup_path = result_dir / backup
+        if backup_path.is_file():
+            os.replace(backup_path, result_dir / original)
+    attrs_backup.unlink(missing_ok=True)
+
+
+def _backfill_full_regime_locked(
+    cfg: PipelineConfig,
+    time_index: int,
+    sigma_grid: float | None = None,
+) -> Path:
+    """Upgrade a complete schema-v4 result using its persistent full work fields."""
+    sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
+    final = cfg.result_path(time_index, sigma)
+    _recover_or_cleanup_regime_upgrade(cfg, final, sigma)
+    if _complete_result_is_current(cfg, final, sigma):
+        return final
+    if _complete_result_schema(final, sigma) != 4:
+        raise RuntimeError("full-regime backfill requires a complete schema-v4 result")
+
+    manifest_path = final / "manifest.json"
+    qa_path = final / "qa.json"
+    if not manifest_path.is_file() or not qa_path.is_file():
+        raise RuntimeError("schema-v4 manifest and QA records are required")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 4:
+        raise RuntimeError("manifest is not schema v4")
+    zarr_path = final / result_zarr_name(sigma)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    if (
+        tuple(root["work_full"].shape) != cfg.full_shape_zyx
+        or tuple(root["work_resolved"].shape) != cfg.full_shape_zyx
+        or tuple(root["regime"].shape) != cfg.result_shape_zyx
+    ):
+        raise RuntimeError("schema-v4 fields do not support full-regime backfill")
+
+    full_points = int(np.prod(cfg.full_shape_zyx, dtype=np.int64))
+    required = full_points + int(cfg.persistent_safety_reserve_gib * 1024**3)
+    free = shutil.disk_usage(final).free
+    if free < required:
+        raise RuntimeError(
+            f"insufficient persistent space for regime backfill: "
+            f"{free / 1024**3:.2f} GiB free, need {required / 1024**3:.2f} GiB"
+        )
+
+    if _REGIME_STAGING_NAME in root:
+        del root[_REGIME_STAGING_NAME]
+    work_chunks = tuple(int(value) for value in root["work_full"].chunks)
+    staged = root.create_dataset(
+        _REGIME_STAGING_NAME,
+        shape=cfg.full_shape_zyx,
+        chunks=work_chunks,
+        dtype="u1",
+        compressor=root["regime"].compressor,
+        fill_value=0,
+    )
+    regime_report = _write_full_regime(
+        root["work_full"], root["work_resolved"], staged, cfg
+    )
+    digest, byte_count, minimum, maximum = hash_zarr_array(staged)
+
+    atomic_json(final / _REGIME_ATTRS_BACKUP, dict(root.attrs))
+    shutil.copy2(manifest_path, final / _REGIME_UPGRADE_FILES["manifest.json"])
+    shutil.copy2(qa_path, final / _REGIME_UPGRADE_FILES["qa.json"])
+    os.replace(final / "COMPLETE", final / _REGIME_UPGRADE_FILES["COMPLETE"])
+    try:
+        root.move("regime", _REGIME_BACKUP_NAME)
+        root.move(_REGIME_STAGING_NAME, "regime")
+
+        qa = json.loads(qa_path.read_text(encoding="utf-8"))
+        qa.update(
+            {
+                "epsilon_full": regime_report["epsilon_full"],
+                "epsilon_resolved": regime_report["epsilon_resolved"],
+                "regime_scope": "full_domain",
+                "regime_point_count": regime_report["point_count"],
+                "occupancy": regime_report["occupancy"],
+            }
+        )
+        reuse = dict(qa.get("reuse", {}))
+        reuse["regime"] = "persistent_schema_v4_full_work_fields"
+        qa["reuse"] = reuse
+        atomic_json(qa_path, qa)
+
+        fields = dict(manifest.get("fields", {}))
+        fields["regime"] = {
+            "shape": list(cfg.full_shape_zyx),
+            "dtype": str(np.dtype("u1")),
+            "chunks": list(work_chunks),
+            "sha256": digest,
+            "byte_count": byte_count,
+            "minimum": minimum,
+            "maximum": maximum,
+        }
+        scopes = dict(manifest.get("field_scopes", {}))
+        scopes["regime"] = "full_domain"
+        manifest.update(
+            {
+                "schema_version": RESULT_SCHEMA_VERSION,
+                "algorithm": "full_periodic_spectral_pi_sbar_regime_v5",
+                "field_scopes": scopes,
+                "fields": fields,
+            }
+        )
+        manifest_hash = atomic_json(manifest_path, manifest)
+        output_hashes = dict(root.attrs.get("output_hashes", {}))
+        output_hashes["regime"] = digest
+        root_scopes = dict(root.attrs.get("field_scopes", {}))
+        root_scopes["regime"] = "full_domain"
+        root.attrs.update(
+            {
+                "result_schema_version": RESULT_SCHEMA_VERSION,
+                "algorithm": "full_periodic_spectral_pi_sbar_regime_v5",
+                "field_scopes": root_scopes,
+                "epsilon_full": regime_report["epsilon_full"],
+                "epsilon_resolved": regime_report["epsilon_resolved"],
+                "regime_scope": "full_domain",
+                "regime_backfill_source_schema": 4,
+                "occupancy": regime_report["occupancy"],
+                "output_hashes": output_hashes,
+                "manifest_hash": manifest_hash,
+            }
+        )
+        atomic_json(final / "COMPLETE", {"manifest_hash": manifest_hash})
+    except Exception:
+        _recover_or_cleanup_regime_upgrade(cfg, final, sigma)
+        raise
+    _recover_or_cleanup_regime_upgrade(cfg, final, sigma)
+    return final
+
+
+def backfill_full_regime(
+    cfg: PipelineConfig,
+    time_index: int,
+    sigma_grid: float | None = None,
+) -> Path:
+    """Serialize and run the persistent-only schema-v4 regime upgrade."""
+    sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
+    cfg.lock_path.mkdir(parents=True, exist_ok=True)
+    lock_name = f"backfill-full-regime-{cfg.result_id(time_index, sigma)}.lock"
+    with FileLock(str(cfg.lock_path / lock_name), timeout=0):
+        return _backfill_full_regime_locked(cfg, time_index, sigma)
+
+
+def reuse_or_backfill_result(
+    cfg: PipelineConfig,
+    time_index: int,
+    sigma_grid: float | None = None,
+) -> Path | None:
+    sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
+    final = cfg.result_path(time_index, sigma)
+    _recover_or_cleanup_regime_upgrade(cfg, final, sigma)
+    if _complete_result_is_current(cfg, final, sigma):
+        return final
+    if _complete_result_schema(final, sigma) == 4:
+        return backfill_full_regime(cfg, time_index, sigma)
+    return None
+
+
 def backfill_full_fields(
     cfg: PipelineConfig,
     time_index: int,
     sigma_grid: float | None = None,
 ) -> Path:
-    """Build schema v4 from an older complete result without fetching JHTDB."""
+    """Build the current full-field schema from v2/v3 without fetching JHTDB."""
     sigma = cfg.sigma_grid if sigma_grid is None else float(sigma_grid)
     final = cfg.result_path(time_index, sigma)
-    if _complete_result_is_current(final, sigma):
+    if _complete_result_is_current(cfg, final, sigma):
         return final
     if not (final / "COMPLETE").is_file():
         raise RuntimeError("an older complete persistent result is required")
@@ -949,5 +1232,8 @@ def upgrade_result(
     time_index: int,
     sigma_grid: float | None = None,
 ) -> Path:
-    """Backward-compatible alias for full-field backfill."""
+    """Upgrade v4 regime directly, or rebuild missing v2/v3 full fields."""
+    existing = reuse_or_backfill_result(cfg, time_index, sigma_grid)
+    if existing is not None:
+        return existing
     return backfill_full_fields(cfg, time_index, sigma_grid)

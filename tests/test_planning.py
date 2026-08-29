@@ -48,9 +48,10 @@ class PlanningTests(unittest.TestCase):
 
     def test_full_domain_energy_fields_are_in_persistent_capacity_plan(self):
         resources = resource_plan(self.cfg)
-        self.assertEqual(resources["persistent_result_GiB"], 28.125)
-        self.assertEqual(resources["persistent_batch_GiB"], 84.375)
-        self.assertEqual(resources["persistent_v3_to_v4_peak_GiB"], 42.25)
+        self.assertEqual(resources["persistent_result_GiB"], 29.0)
+        self.assertEqual(resources["persistent_batch_GiB"], 87.0)
+        self.assertEqual(resources["persistent_v3_to_v5_peak_GiB"], 43.125)
+        self.assertEqual(resources["persistent_v4_regime_backfill_peak_GiB"], 29.125)
         self.assertGreater(
             resources["persistent_batch_with_reserve_GiB"],
             resources["observed_account_capacity_GiB"],

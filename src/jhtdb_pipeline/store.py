@@ -126,7 +126,7 @@ def create_result_group(
                 "gradient": "center_crop",
                 "velocity_bar": "center_crop",
                 "gradient_bar": "center_crop",
-                "regime": "center_crop",
+                "regime": "full_domain",
                 "work_full": "full_domain",
                 "work_resolved": "full_domain",
                 "pi": "full_domain",
@@ -158,7 +158,7 @@ def create_result_group(
             dtype="<f4", compressor=codec, fill_value=np.nan,
         )
     root.require_dataset(
-        "regime", shape=(nz, ny, nx), chunks=(cz, cy, cx),
+        "regime", shape=(full_nz, full_ny, full_nx), chunks=full_chunks,
         dtype="u1", compressor=codec, fill_value=0,
     )
     return root

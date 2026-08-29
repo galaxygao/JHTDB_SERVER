@@ -1,5 +1,7 @@
 # S̄ 全域 QA — 待办与理由
 
+> 后续变更：schema v5 已把 `regime` 从中心 `512³` 扩展为全周期域 `1024³`。下文关于 schema v4 保持中心 regime 的内容是当时的实施边界；已有 v4 可直接复用 persistent 全域 `work_full/work_resolved` 快速补齐，新计算与 `single-frame` 均永久保存全域 regime。
+
 ## 目标
 在**全周期域**上验证 S̄ = ∂ⱼ(ūᵢτᵢⱼ) 的散度归零性质，确认其残余不污染净级串 ⟨Π⟩，并把四个量的全域总量可视化。
 

@@ -162,7 +162,7 @@ def run_sbar_qa(
         str(result_dir / result_zarr_name(sigma)), mode="a"
     )
     if root.attrs.get("result_schema_version") != RESULT_SCHEMA_VERSION:
-        raise RuntimeError("full-domain schema-v4 result is required")
+        raise RuntimeError("current full-domain result schema is required")
     report = compute_sbar_qa(root, cfg, scope="full_domain")
     report_hash = write_sbar_artifacts(result_dir, report)
     qa_path = result_dir / "qa.json"

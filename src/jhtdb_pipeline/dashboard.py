@@ -76,12 +76,6 @@ def spatial_axis_length(array, axis: str) -> int:
     return int(array.shape[{"z": -3, "y": -2, "x": -1}[axis]])
 
 
-def full_index_to_crop(index: int, axis: str, crop_start, crop_shape) -> int | None:
-    component = {"x": 0, "y": 1, "z": 2}[axis]
-    local = index - int(crop_start[component])
-    return local if 0 <= local < int(crop_shape[component]) else None
-
-
 def _global_totals_figure(report: dict):
     totals = report["global_totals"]
     return go.Figure(
@@ -228,7 +222,7 @@ def _regime_figure(values: np.ndarray, title: str):
 def main() -> None:
     st.set_page_config(page_title="JHTDB SciServer viewer", layout="wide")
     cfg = load_config(os.environ.get("JHTDB_PIPELINE_CONFIG", "configs/pipeline.yaml"))
-    st.title("JHTDB 中心周期域结果（服务器只读）")
+    st.title("JHTDB 周期域结果（服务器只读）")
     paths = complete_result_paths(cfg.result_root)
     if not paths:
         st.info("persistent 中还没有带 COMPLETE 标记的正式结果。")
@@ -313,14 +307,8 @@ def main() -> None:
         left, right = st.columns(2)
         left.plotly_chart(_continuous_figure(full, "work_full"), use_container_width=True)
         right.plotly_chart(_continuous_figure(resolved, "work_resolved"), use_container_width=True)
-        regime_index = full_index_to_crop(
-            index, axis, cfg.crop_start, cfg.crop_shape
-        )
-        if regime_index is None:
-            st.info("当前全域切片位于中心 crop 之外，没有持久化 regime。")
-        else:
-            codes = extract_scalar_slice(result["regime"], axis, regime_index)
-            st.plotly_chart(_regime_figure(codes, "regime"), use_container_width=True)
+        codes = extract_scalar_slice(result["regime"], axis, index)
+        st.plotly_chart(_regime_figure(codes, "regime（全域）"), use_container_width=True)
         st.json(dict(result.attrs.get("occupancy", {})))
     elif page == "Π 与 S̄":
         if "pi" not in result or "s_bar" not in result:
@@ -387,8 +375,8 @@ def main() -> None:
                 st.json(report)
         else:
             st.warning(
-                "当前正式结果没有 s_bar_qa.json。请选择已完成的 schema v4 结果，"
-                "或对完整 v4 结果运行 qa-sbar。正在计算的 staging 不会进入 GUI。"
+                "当前正式结果没有 s_bar_qa.json。请选择已完成的当前 schema 结果，"
+                "或对完整结果运行 qa-sbar。正在计算的 staging 不会进入 GUI。"
             )
         st.subheader("完整性与其他 QA 记录")
         for filename in ("manifest.json", "qa.json", "divergence.json", "COMPLETE"):

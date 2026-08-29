@@ -108,7 +108,7 @@ persistent 用于：
 - `results/.staging` 中尚未正式提交的中心字段与全域能量场；
 - `results/<result_id>` 中带 `COMPLETE` 的权威结果。
 
-persistent 不保存完整 `1024^3` 原始速度缓存或全域 FFT 工作场，但保存四个 `1024^3` 全域能量场。schema v4 单尺度正式结果未压缩约 28.125 GiB，配置另保留至少 15 GiB 安全余量；三个尺度约 84.375 GiB，提交前必须结合 Quotas 决定是否只保留部分尺度或扩容。
+persistent 不保存完整 `1024^3` 原始速度缓存或全域 FFT 工作场，但保存四个 `1024^3` 全域能量场和全域 `uint8 regime`。schema v5 单尺度正式结果未压缩约 29 GiB，配置另保留至少 15 GiB 安全余量；三个尺度约 87 GiB，提交前必须结合 Quotas 决定是否只保留部分尺度或扩容。
 
 ### 3.7 scratch / Temporary
 
@@ -324,7 +324,7 @@ doctor → cache/validate-input → process-center → finalize-result
 
 - 已验证的 `128^3` tile 会回读 SHA-256 后跳过；某个 `512^3` request 仍有缺块时只重新请求该大块；
 - 谱处理若中断，会清理同一 result 的旧 staging/workspace 并从处理阶段开头重算；
-- 已存在且带 `COMPLETE` 的相同 `time_index + sigma_grid` 当前 v4 结果不会被覆盖；v2/v3 结果仅在全域 backfill、中心重叠和新版 staging 校验全部通过后被替换；
+- 已存在且带 `COMPLETE` 的相同 `time_index + sigma_grid` 当前 v5 结果直接复用；v4 只读已有全域 work 字段补齐全域 regime；v2/v3 仅在全域 backfill、中心重叠和新版 staging 校验全部通过后被替换；
 - 失败的 staging 不会出现在 GUI 正式结果列表中。
 
 查看状态：
@@ -347,9 +347,10 @@ python -m jhtdb_pipeline status --config configs/pipeline.yaml
 | `validate-input --time-index N` | 重新验证完整输入缓存 |
 | `process-center --time-index N --sigma-grid S` | 全域谱处理并写 persistent staging |
 | `finalize-result --time-index N --sigma-grid S` | 校验 staging 并提交正式结果 |
-| `backfill-full-fields --time-index N --sigma-grid S` | 复用 filtered workspace 或 raw cache，把 v2/v3 补算为全域 v4；不自动 fetch |
-| `qa-sbar --time-index N --sigma-grid S` | 从 v4 全域四场重算 S̄ 三层 QA 和柱状图 |
-| `upgrade-result --time-index N --sigma-grid S` | `backfill-full-fields` 的兼容别名 |
+| `backfill-full-fields --time-index N --sigma-grid S` | 复用 filtered workspace 或 raw cache，把 v2/v3 补算为当前全域 schema；不自动 fetch |
+| `backfill-full-regime --time-index N --sigma-grid S` | 从 v4 persistent 全域 work 字段快速补齐全域 regime；不做 FFT |
+| `qa-sbar --time-index N --sigma-grid S` | 从当前全域四场重算 S̄ 三层 QA 和柱状图 |
+| `upgrade-result --time-index N [--sigma-grid S]` | 自动选择 v4 regime 快速补齐或 v2/v3 temporary 补算 |
 | `single-frame --time-index N [--sigma-grid S]` | 串联完整流程；默认批量处理配置列表，指定参数时只跑一个尺度 |
 | `status` | 列出输入和正式/非正式结果状态 |
 | `gui` | 启动只读服务器 GUI |
@@ -364,7 +365,7 @@ source .venv/bin/activate
 python -m jhtdb_pipeline gui --config configs/pipeline.yaml --port 8501
 ```
 
-它监听 `0.0.0.0:8501`，只读取 `persistent/results` 中带 `COMPLETE` 的正式 Zarr，并按需载入二维切片。支持 raw/filtered velocity、raw/filtered gradient、work、`pi`、`s_bar`、regime、QA 和 manifest。
+它监听 `0.0.0.0:8501`，只读取 `persistent/results` 中带 `COMPLETE` 的正式 Zarr，并按需载入二维切片。支持中心 raw/filtered velocity 与 gradient，以及全域 work、`pi`、`s_bar`、regime、QA 和 manifest。
 
 需要通过当前 SciServer compute domain 提供的端口入口打开。若该 domain 不提供 Streamlit 端口代理，当前 CLI 不会自动建立 Jupyter 内嵌 viewer；应先补充服务器端 viewer，而不是把数据下载到本地。
 

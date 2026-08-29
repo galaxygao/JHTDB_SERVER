@@ -15,9 +15,11 @@ from .jhtdb import fetch_snapshot, smoke
 from .planning import plan
 from .processing import (
     backfill_full_fields,
+    backfill_full_regime,
     finalize_result,
     process_center,
     resource_plan,
+    reuse_or_backfill_result,
     upgrade_result,
 )
 from .sbar_qa import run_sbar_qa
@@ -42,7 +44,7 @@ def _sigma(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SciServer-only JHTDB periodic center pipeline"
+        description="SciServer-only JHTDB periodic-domain pipeline"
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -67,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
         "single-frame",
         "upgrade-result",
         "backfill-full-fields",
+        "backfill-full-regime",
         "qa-sbar",
     ):
         command = commands.add_parser(name)
@@ -115,17 +118,28 @@ def _selected_sigmas(cfg, sigma_grid: float | None) -> tuple[float, ...]:
 
 
 def _run_single_frame(cfg, time_index: int, sigma_grid: float | None) -> list[Path]:
+    sigmas = _selected_sigmas(cfg, sigma_grid)
+    results: dict[float, Path] = {}
+    pending = []
+    for sigma in sigmas:
+        existing = reuse_or_backfill_result(cfg, time_index, sigma)
+        if existing is None:
+            pending.append(sigma)
+        else:
+            results[sigma] = existing
+    if not pending:
+        return [results[sigma] for sigma in sigmas]
+
     report = doctor(cfg, time_index)
     if report["status"] != "ok":
         raise RuntimeError(f"SciServer doctor failed: {json.dumps(report['checks'])}")
     fetch_snapshot(cfg, time_index)
     validate_snapshot(cfg, time_index)
-    results = []
-    for sigma in _selected_sigmas(cfg, sigma_grid):
+    for sigma in pending:
         print(f"batch frame={time_index} sigma_grid={sigma:g}", flush=True)
         process_center(cfg, time_index, sigma)
-        results.append(finalize_result(cfg, time_index, sigma))
-    return results
+        results[sigma] = finalize_result(cfg, time_index, sigma)
+    return [results[sigma] for sigma in sigmas]
 
 
 def _print_paths(paths: list[Path]) -> None:
@@ -193,6 +207,13 @@ def main(argv: list[str] | None = None) -> int:
             _print_paths(
                 [
                     backfill_full_fields(cfg, args.time_index, sigma)
+                    for sigma in _selected_sigmas(cfg, args.sigma_grid)
+                ]
+            )
+        elif args.command == "backfill-full-regime":
+            _print_paths(
+                [
+                    backfill_full_regime(cfg, args.time_index, sigma)
                     for sigma in _selected_sigmas(cfg, args.sigma_grid)
                 ]
             )

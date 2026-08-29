@@ -18,6 +18,7 @@ from jhtdb_pipeline.planning import Tile
 from jhtdb_pipeline.sbar_qa import run_sbar_qa
 from jhtdb_pipeline.processing import (
     backfill_full_fields,
+    backfill_full_regime,
     filter_field as processing_filter_field,
     finalize_result,
     process_center,
@@ -70,7 +71,7 @@ class ProcessingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             cfg, velocity = fixture(Path(temporary))
             plan = resource_plan(cfg)
-            expected_result_bytes = 8**3 * 97 + 16**3 * 16
+            expected_result_bytes = 8**3 * 96 + 16**3 * 17
             self.assertEqual(
                 plan["persistent_result_GiB"], expected_result_bytes / 1024**3
             )
@@ -97,7 +98,7 @@ class ProcessingTests(unittest.TestCase):
             self.assertEqual(result["velocity"].shape, (3, 8, 8, 8))
             self.assertEqual(result["gradient"].shape, (3, 3, 8, 8, 8))
             self.assertEqual(result["work_full"].shape, (16, 16, 16))
-            self.assertEqual(result["regime"].shape, (8, 8, 8))
+            self.assertEqual(result["regime"].shape, (16, 16, 16))
             crop = (slice(4, 12), slice(4, 12), slice(4, 12))
             np.testing.assert_allclose(result["velocity"][0], velocity[(0,) + crop])
             expected_filtered = spectral_gaussian(velocity[0], cfg.sigma_grid)[crop]
@@ -156,7 +157,8 @@ class ProcessingTests(unittest.TestCase):
             self.assertFalse(cfg.workspace_path(1).exists())
             self.assertFalse(any(final.rglob("*.part-*")))
             manifest = json.loads((final / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 4)
+            self.assertEqual(manifest["schema_version"], 5)
+            self.assertEqual(manifest["field_scopes"]["regime"], "full_domain")
             self.assertIn("s_bar_qa_report_hash", manifest)
             self.assertEqual(
                 json.loads((final / "COMPLETE").read_text(encoding="utf-8"))[
@@ -223,9 +225,9 @@ class ProcessingTests(unittest.TestCase):
                 "gradient",
                 "velocity_bar",
                 "gradient_bar",
-                "regime",
             ):
                 old_fields[name] = np.asarray(current[name][:])
+            old_fields["regime"] = np.asarray(current["regime"][crop])
             for name in ("work_full", "work_resolved", "pi", "s_bar"):
                 old_fields[name] = np.asarray(current[name][crop])
             del current
@@ -254,12 +256,58 @@ class ProcessingTests(unittest.TestCase):
 
             self.assertEqual(upgraded, final)
             result = open_complete_result(final)
-            self.assertEqual(result.attrs["result_schema_version"], 4)
+            self.assertEqual(result.attrs["result_schema_version"], 5)
             self.assertEqual(result["work_full"].shape, cfg.full_shape_zyx)
+            self.assertEqual(result["regime"].shape, cfg.full_shape_zyx)
             qa = json.loads((final / "qa.json").read_text(encoding="utf-8"))
             overlap = qa["reuse"]["previous_center_overlap"]
             self.assertTrue(overlap["passed"])
             self.assertEqual(overlap["scope"], "stored_center_crop")
+
+    def test_v4_full_regime_backfill_uses_persistent_work_fields_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg, _ = fixture(Path(temporary))
+            process_center(cfg, 1)
+            final = finalize_result(cfg, 1)
+            zarr_path = final / result_zarr_name(cfg.sigma_grid)
+            root = zarr.open_group(str(zarr_path), mode="a")
+            expected = np.asarray(root["regime"][:])
+            center = np.asarray(root["regime"][cfg.crop_slices_zyx])
+            chunks = tuple(min(4, size) for size in center.shape)
+            compressor = root["regime"].compressor
+            del root["regime"]
+            root.create_dataset(
+                "regime", data=center, chunks=chunks, dtype="u1",
+                compressor=compressor,
+            )
+            scopes = dict(root.attrs["field_scopes"])
+            scopes["regime"] = "center_crop"
+            root.attrs.update(
+                {"result_schema_version": 4, "field_scopes": scopes}
+            )
+            manifest_path = final / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 4
+            manifest["field_scopes"]["regime"] = "center_crop"
+            manifest["fields"]["regime"]["shape"] = list(cfg.result_shape_zyx)
+            atomic_json(manifest_path, manifest)
+            shutil.rmtree(cfg.raw_store_path(1))
+
+            upgraded = backfill_full_regime(cfg, 1)
+
+            self.assertEqual(upgraded, final)
+            current = open_complete_result(final)
+            self.assertEqual(current.attrs["result_schema_version"], 5)
+            self.assertEqual(current["regime"].shape, cfg.full_shape_zyx)
+            np.testing.assert_array_equal(current["regime"][:], expected)
+            qa = json.loads((final / "qa.json").read_text(encoding="utf-8"))
+            self.assertEqual(qa["regime_scope"], "full_domain")
+            self.assertEqual(qa["regime_point_count"], 16**3)
+            self.assertEqual(
+                qa["reuse"]["regime"],
+                "persistent_schema_v4_full_work_fields",
+            )
+            self.assertFalse(any(final.glob(".*regime-v4-backup*")))
 
     def test_backfill_never_fetches_when_temporary_raw_cache_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

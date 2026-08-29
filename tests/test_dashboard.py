@@ -15,7 +15,6 @@ from jhtdb_pipeline.dashboard import (
     extract_gradient_slice,
     extract_scalar_slice,
     extract_slice,
-    full_index_to_crop,
     sbar_metric_rows,
     spatial_axis_length,
 )
@@ -55,12 +54,6 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(spatial_axis_length(vector, "x"), 6)
         self.assertEqual(spatial_axis_length(vector, "y"), 5)
         self.assertEqual(spatial_axis_length(vector, "z"), 4)
-
-    def test_full_index_maps_to_center_crop_only_when_present(self) -> None:
-        self.assertEqual(full_index_to_crop(256, "x", (256, 256, 256), (512, 512, 512)), 0)
-        self.assertEqual(full_index_to_crop(767, "z", (256, 256, 256), (512, 512, 512)), 511)
-        self.assertIsNone(full_index_to_crop(255, "y", (256, 256, 256), (512, 512, 512)))
-        self.assertIsNone(full_index_to_crop(768, "x", (256, 256, 256), (512, 512, 512)))
 
     def test_global_totals_bar_order(self) -> None:
         report = {

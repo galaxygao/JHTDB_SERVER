@@ -9,7 +9,7 @@ from typing import Any, Mapping
 import yaml
 
 
-RESULT_SCHEMA_VERSION = 4
+RESULT_SCHEMA_VERSION = 5
 
 
 def _tuple3(value: Any, name: str) -> tuple[int, int, int]:
@@ -167,8 +167,8 @@ class PipelineConfig:
     def result_uncompressed_bytes(self) -> int:
         center_points = int(self.crop_shape[0] * self.crop_shape[1] * self.crop_shape[2])
         full_points = int(self.grid_shape[0] * self.grid_shape[1] * self.grid_shape[2])
-        center_fields = center_points * (3 + 9 + 3 + 9) * 4 + center_points
-        full_fields = full_points * 4 * 4
+        center_fields = center_points * (3 + 9 + 3 + 9) * 4
+        full_fields = full_points * (4 * 4 + 1)
         return center_fields + full_fields
 
     def physical_time(self, time_index: int) -> float:

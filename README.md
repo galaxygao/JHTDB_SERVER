@@ -1,6 +1,6 @@
-# JHTDB SciServer 全周期域中心流水线
+# JHTDB SciServer 全周期域流水线
 
-本项目只在 Johns Hopkins SciServer 上运行。它从 JHTDB 获取 `isotropic1024coarse` 的单帧完整速度场，在完整周期域上完成谱导数与谱高斯滤波，把中心 `512^3` 的速度、梯度和状态分类以及全域 `1024^3` 的四个能量场保存到 SciServer persistent，并在 Interactive container 中提供只读 GUI。科学数据不下载到本地电脑，也不依赖本地文件系统。
+本项目只在 Johns Hopkins SciServer 上运行。它从 JHTDB 获取 `isotropic1024coarse` 的单帧完整速度场，在完整周期域上完成谱导数与谱高斯滤波，把中心 `512^3` 的速度和梯度，以及全域 `1024^3` 的四个能量场与 regime 保存到 SciServer persistent，并在 Interactive container 中提供只读 GUI。科学数据不下载到本地电脑，也不依赖本地文件系统。
 
 SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERVER_SYSTEM_GUIDE.md`](SCISERVER_SYSTEM_GUIDE.md)。本 README 是项目功能、配置、安装、运行、代码结构和验收标准的主入口。
 
@@ -13,7 +13,7 @@ SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERV
 - 从 JHTDB 可靠地获取一帧完整 `1024^3 × 3` 周期速度场；
 - 避免把可重建的完整原始速度和 FFT 工作场长期保存在 persistent；
 - 保证 FFT、谱导数和滤波在完整周期域上进行，避免先裁剪造成边界伪影；
-- 永久保存中心 `512^3` 的未滤波/滤波速度、梯度和 regime，以及全域四个能量场；
+- 永久保存中心 `512^3` 的未滤波/滤波速度和梯度，以及全域四个能量场与 regime；
 - 在服务器上直接查看正式结果，不下载结果归档到本地；
 - 对下载、坐标、物理计算、输出提交和 token 使用建立可审计的验证链。
 
@@ -45,8 +45,8 @@ scratch/velocity_cache.zarr
         │ FFT 谱导数 + 谱高斯滤波 + work
         ▼
 persistent/results/.staging/<result_id>
-        │ 速度/梯度/regime 写中心 [256:768)^3
-        │ W_full/W_res/Π/S̄ 写完整 1024^3
+        │ 速度/梯度写中心 [256:768)^3
+        │ W_full/W_res/Π/S̄/regime 写完整 1024^3
         │ schema、有限值、散度、字段 SHA-256 验证
         ▼
 persistent/results/<result_id>/ + COMPLETE
@@ -54,7 +54,7 @@ persistent/results/<result_id>/ + COMPLETE
         └── Interactive container 中的只读 GUI
 ```
 
-scratch 只保存可重建的完整速度缓存、FFT memmap 和临时工作区；persistent 保存代码、状态、验证记录、中心速度/梯度/regime 和四个全域能量场。正常成功后，尺度对应的 FFT 工作区会按配置清理；完整速度缓存可在确认不再 backfill 该帧后再删除。
+scratch 只保存可重建的完整速度缓存、FFT memmap 和临时工作区；persistent 保存代码、状态、验证记录、中心速度/梯度，以及全域 regime 和四个能量场。正常成功后，尺度对应的 FFT 工作区会按配置清理；完整速度缓存可在确认不再 backfill 该帧后再删除。
 
 ### 1.4 科学计算约定
 
@@ -93,7 +93,7 @@ work_full = work_resolved - pi + s_bar
 
 这里的 `pi` 严格采用式 (2) 的符号约定。常见 LES 文献定义的正向能量通量 `Pi_conventional = -tau_ij S_ij`，在不可压缩且应力对称时等于这里的 `-pi`。QA 会记录上述 work 分解的逐点残差 RMS 和最大绝对值。
 
-`regime` 根据两种 work 相对于各自阈值的正负组合编码为 uncertain、Q1、Q2、Q3、Q4。
+`regime` 在全周期域根据两种 work 相对于各自全域 RMS 阈值的正负组合编码为 uncertain、Q1、Q2、Q3、Q4。
 
 ## 2. 配置、安装与使用
 
@@ -303,7 +303,7 @@ python -m jhtdb_pipeline single-frame \
 
 省略 `--sigma-grid` 时会按配置顺序处理全部尺度；每个需要计算的尺度显示 `periodic spectral pipeline 0/42` 到 `42/42`。若只想运行一个尺度，可增加例如 `--sigma-grid 1.0`。`run_stage.sh` 的计算行为相同并会保留日志，但由于输出经过 `tee`，Compute Job 页面可能只显示阶段结束时的最终进度行。
 
-需要中断 Interactive Terminal 中的任务时优先按 `Ctrl+C`，并确认旧进程退出后再重启。已校验的 JHTDB 分块和完整 v4 结果会复用；当前尺度未完成的 staging 会重算，但匹配且完整的 temporary 滤波速度仍可自动复用。
+需要中断 Interactive Terminal 中的任务时优先按 `Ctrl+C`，并确认旧进程退出后再重启。已校验的 JHTDB 分块和完整 v5 结果会复用；v4 会快速补齐全域 regime；当前尺度未完成的 staging 会重算，但匹配且完整的 temporary 滤波速度仍可自动复用。
 
 完整执行顺序：
 
@@ -317,9 +317,9 @@ doctor → cache → validate-input → process-center → finalize-result
 state/logs/single-frame_<UTC timestamp>.log
 ```
 
-省略 `--sigma-grid` 时，命令依次计算配置中的全部 `physics.sigma_grid`；提供该参数时只计算指定尺度。相同 `time-index` 和 `sigma_grid` 的完整 v4 结果已经存在时直接复用。旧 v2/v3 只有中心四场，无法仅靠元数据升级为全域 v4；使用 `backfill-full-fields` 可优先复用 temporary 中已验证的滤波速度，否则复用 `velocity_cache.zarr`，不会重新访问 JHTDB。旧 persistent 结果保留到 v4 staging 完成、中心重叠一致且字段校验通过后才替换。
+省略 `--sigma-grid` 时，命令依次计算配置中的全部 `physics.sigma_grid`；提供该参数时只计算指定尺度。相同 `time-index` 和 `sigma_grid` 的完整 v5 结果已经存在时直接复用。完整 v4 会直接读取 persistent 中已有的全域 `work_full/work_resolved`，快速补齐全域 regime，不访问 JHTDB、不做滤波或 FFT。旧 v2/v3 使用 temporary 中已验证的滤波速度或 `velocity_cache.zarr` 补算完整 v5；旧 persistent 结果保留到新版校验通过后才替换。
 
-尺度采用顺序批处理，不会同时启动多个约 52 GiB scratch 峰值的 FFT 流程。v4 每个尺度未压缩约 28.125 GiB，三个尺度约 84.375 GiB；100 GB 十进制配额折合约 93.1 GiB，无法再同时满足 15 GiB reserve，因此必须先用 `plan` 和 Quotas 决定尺度数量或扩容。
+尺度采用顺序批处理，不会同时启动多个约 52 GiB scratch 峰值的 FFT 流程。v5 每个尺度未压缩约 29 GiB，三个尺度约 87 GiB；100 GB 十进制配额折合约 93.1 GiB，无法再同时满足 15 GiB reserve，因此必须先用 `plan` 和 Quotas 决定尺度数量或扩容。
 
 ### 2.8 分阶段运行、排错与状态
 
@@ -338,10 +338,16 @@ python -m jhtdb_pipeline process-center --time-index 1 --sigma-grid 1.0 --config
 # 校验 staging 并原子提交正式结果
 python -m jhtdb_pipeline finalize-result --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
-# 用已有 temporary 数据把 v2/v3 中心结果补算为全域 v4
+# 用已有 temporary 数据把 v2/v3 中心结果补算为当前全域 schema
 python -m jhtdb_pipeline backfill-full-fields --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
-# 对完整 v4 四场重复运行全域 S_bar QA 和柱状图
+# 只读已有 v4 全域 work 字段，快速补齐全域 regime
+python -m jhtdb_pipeline backfill-full-regime --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+
+# 自动选择 v4 快速补齐或 v2/v3 temporary 补算；省略 sigma 时处理配置中全部尺度
+python -m jhtdb_pipeline upgrade-result --time-index 1 --config configs/pipeline.yaml
+
+# 对完整当前 schema 的四场重复运行全域 S_bar QA 和柱状图
 python -m jhtdb_pipeline qa-sbar --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
 # 查看输入和正式结果状态
@@ -360,10 +366,11 @@ CLI 命令汇总：
 | `validate-input` | 否 | 完整输入缓存验证 |
 | `process-center` | 否 | 全域谱计算并写 staging |
 | `finalize-result` | 否 | 字段级验证并提交正式结果 |
-| `backfill-full-fields` | 否 | 复用 temporary 数据，把已有 v2/v3 结果补算成全域 v4 |
-| `qa-sbar` | 否 | 读取 v4 全域四场，重算三层 S̄ QA 与净总量柱状图 |
-| `upgrade-result` | 否 | `backfill-full-fields` 的兼容别名 |
-| `single-frame` | 是 | 串联完整单帧流程，并顺序批量处理配置的滤波尺度 |
+| `backfill-full-fields` | 否 | 复用 temporary 数据，把已有 v2/v3 结果补算成当前全域 schema |
+| `backfill-full-regime` | 否 | 只读 v4 persistent 全域 work 字段，快速补齐全域 regime |
+| `qa-sbar` | 否 | 读取当前全域四场，重算三层 S̄ QA 与净总量柱状图 |
+| `upgrade-result` | 否 | 自动选择 v4 regime 快速补齐或 v2/v3 全场补算 |
+| `single-frame` | 按需 | 已有 v4/v5 不访问 JHTDB；缺少完整结果时串联单帧流程 |
 | `status` | 否 | 输入缓存和正式结果状态 |
 | `gui` | 否 | 启动只读服务器 GUI |
 
@@ -536,7 +543,7 @@ python -m unittest discover -s tests -v
 - `|ΣS̄|/Σ|S̄|` 不超过 `1e-4`，且 `|ΣS̄|/|ΣΠ|` 不超过 `1e-2`；
 - regime 阈值和 occupancy 写入 QA。
 
-`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套全域统计。`s_bar_qa.json` 记录四个全域净和、绝对和、能量等式残差以及两个 S̄ 比率；`s_bar_global_totals.html` 是可离线打开的四柱图。`qa-sbar` 只接受 schema v4 全域结果，旧中心结果不能冒充全域 QA。`process-center` 在任一速度场散度验证失败时保留失败 staging，不创建 `COMPLETE`；S̄ QA 失败会保留全域数据供诊断，并在 attrs/QA 中明确标记失败。
+`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套全域统计。`s_bar_qa.json` 记录四个全域净和、绝对和、能量等式残差以及两个 S̄ 比率；`s_bar_global_totals.html` 是可离线打开的四柱图。`qa-sbar` 只接受当前全域结果 schema，旧中心结果不能冒充全域 QA。`process-center` 在任一速度场散度验证失败时保留失败 staging，不创建 `COMPLETE`；S̄ QA 失败会保留全域数据供诊断，并在 attrs/QA 中明确标记失败。
 
 ### 4.4 输出 Review 与提交规则
 
@@ -550,7 +557,7 @@ python -m unittest discover -s tests -v
 - staging 到正式目录的同文件系统原子 rename；
 - 最后创建包含 manifest hash 的 `COMPLETE`。
 
-当前 schema 的正式目录已存在时拒绝覆盖。v2/v3 结果必须补算缺失的中心外区域，不能直接改版本号；旧结果只会在 v4 staging 完成、已有中心四场重叠校验一致且字段校验通过后被替换。GUI 要求目录具有 `COMPLETE` 且 Zarr attrs 状态为 `complete`，不会把部分写入结果当成正式数据。
+当前 schema 的正式目录已存在时拒绝覆盖。v4 可从已有全域 work 字段原子补齐全域 regime；v2/v3 必须补算缺失的中心外区域，不能直接改版本号。旧结果只会在 v5 staging 完成、已有中心四场重叠校验一致且字段校验通过后被替换。GUI 要求目录具有 `COMPLETE` 且 Zarr attrs 状态为 `complete`，不会把部分写入结果当成正式数据。
 
 Review 正式结果时执行：
 
@@ -579,7 +586,7 @@ center_result_sigma_<sigma_tag>.zarr/
 - 配置加载器拒绝未知字段和不符合生产约束的 shape/path/阈值；
 - 处理锁防止同一计算工作区被并发写入；
 - 删除临时工作区前验证目标位于预期 scratch 父目录；
-- persistent 提交不覆盖当前 schema 的正式结果；v2/v3 只在 v4 补算和校验完成后替换；
+- persistent 提交不覆盖当前 schema 的正式结果；v4 regime 快速补齐以及 v2/v3 全场补算都只在校验完成后提交；
 - GUI 以只读模式打开 Zarr，不提供上传、编辑或删除操作；
 - `doctor` 在正式任务前检查 persistent/scratch 写权限、空间余量和 scratch 到期状态。
 
@@ -636,9 +643,9 @@ results/t000001_sigma_1/
 | `work_resolved` | `(1024,1024,1024)` | `float32` | 4 GiB |
 | `pi` | `(1024,1024,1024)` | `float32` | 4 GiB |
 | `s_bar` | `(1024,1024,1024)` | `float32` | 4 GiB |
-| `regime` | `(512,512,512)` | `uint8` | 0.125 GiB |
+| `regime` | `(1024,1024,1024)` | `uint8` | 1 GiB |
 
-单尺度未压缩合计约 28.125 GiB，另有 Zarr metadata、HTML 和文件系统开销。正式结果不打包、不分卷、不自动下载。
+单尺度未压缩合计约 29 GiB，另有 Zarr metadata、HTML 和文件系统开销。正式结果不打包、不分卷、不自动下载。
 
 ## 6. 失败恢复与当前边界
 
@@ -650,6 +657,7 @@ results/t000001_sigma_1/
 | scratch run 超过配置生命周期 | `doctor` 拒绝继续信任，重新建立该帧缓存 |
 | `process-center` 中断 | 同参数重跑；有效的 filtered velocity checkpoint 会复用，正式结果不受影响 |
 | v2/v3 需要全域四场 | 运行 `backfill-full-fields`；复用 filtered workspace 或 raw cache，不自动 fetch |
+| v4 需要全域 regime | 运行 `backfill-full-regime`；只读 persistent 全域 work 字段，不需要 temporary 或 FFT |
 | `qa-sbar` 失败 | 保留全域数据和报告，检查 `s_bar_qa.json`，命令返回非零 |
 | 散度失败 | staging 保留诊断数据，不创建 `COMPLETE` |
 | `finalize-result` 前失败 | GUI 不显示 staging |
