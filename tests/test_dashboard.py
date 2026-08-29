@@ -11,10 +11,12 @@ from jhtdb_pipeline.dashboard import (
     _symlog_transform,
     _global_totals_figure,
     complete_result_paths,
+    energy_identity_residual,
     extract_gradient_slice,
     extract_scalar_slice,
     extract_slice,
     full_index_to_crop,
+    sbar_metric_rows,
     spatial_axis_length,
 )
 
@@ -72,6 +74,45 @@ class DashboardTests(unittest.TestCase):
         }
         figure = _global_totals_figure(report)
         self.assertEqual(list(figure.data[0].y), [1.0, 2.0, 3.0, 4.0])
+
+    def test_sbar_metric_rows_expose_thresholds_and_status(self) -> None:
+        report = {
+            "metrics": {
+                "identity_residual_rms": {
+                    "value": 2.0e-5,
+                    "maximum_abs": 3.0e-3,
+                    "threshold": 1.0e-4,
+                    "passed": True,
+                },
+                "s_bar_rel_self": {
+                    "value": 4.0e-6,
+                    "threshold": 1.0e-4,
+                    "passed": True,
+                    "error": None,
+                },
+                "s_bar_vs_pi_net": {
+                    "value": None,
+                    "threshold": 1.0e-2,
+                    "passed": False,
+                    "error": "denominator is zero",
+                },
+            }
+        }
+        rows = sbar_metric_rows(report)
+        self.assertEqual([row["状态"] for row in rows], ["通过", "通过", "失败"])
+        self.assertEqual(rows[2]["值"], "不可定义")
+        self.assertEqual(rows[2]["说明"], "denominator is zero")
+        self.assertIn("maximum_abs=", rows[0]["说明"])
+
+    def test_energy_identity_residual_uses_documented_signs(self) -> None:
+        full = np.array([[7.0, 8.0]])
+        resolved = np.array([[10.0, 10.0]])
+        pi = np.array([[2.0, 3.0]])
+        s_bar = np.array([[-1.0, 1.0]])
+        np.testing.assert_array_equal(
+            energy_identity_residual(full, resolved, pi, s_bar),
+            np.array([[0.0, 0.0]]),
+        )
 
     def test_only_complete_persistent_results_are_listed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

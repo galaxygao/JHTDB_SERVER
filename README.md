@@ -291,6 +291,20 @@ python -m jhtdb_pipeline smoke --time-index 1 --config configs/pipeline.yaml
 bash -lc 'cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA && source .venv/bin/activate && bash scripts/run_stage.sh single-frame --time-index 1'
 ```
 
+如果希望在 Interactive Terminal 中实时查看 Rich 进度条，不要经过 `run_stage.sh` 的 `tee`，直接运行 Python 入口：
+
+```bash
+cd /home/idies/workspace/Storage/gaoxingqun/persistent/JHU_DATA
+source .venv/bin/activate
+python -m jhtdb_pipeline single-frame \
+  --time-index 1 \
+  --config configs/pipeline.yaml
+```
+
+省略 `--sigma-grid` 时会按配置顺序处理全部尺度；每个需要计算的尺度显示 `periodic spectral pipeline 0/42` 到 `42/42`。若只想运行一个尺度，可增加例如 `--sigma-grid 1.0`。`run_stage.sh` 的计算行为相同并会保留日志，但由于输出经过 `tee`，Compute Job 页面可能只显示阶段结束时的最终进度行。
+
+需要中断 Interactive Terminal 中的任务时优先按 `Ctrl+C`，并确认旧进程退出后再重启。已校验的 JHTDB 分块和完整 v4 结果会复用；当前尺度未完成的 staging 会重算，但匹配且完整的 temporary 滤波速度仍可自动复用。
+
 完整执行顺序：
 
 ```text
@@ -371,8 +385,9 @@ GUI 监听 `0.0.0.0:8501`，支持：
 - 9 个 `gradient` 与 `gradient_bar` 分量对比；
 - 梯度线性或 SymLog 色标和显示分位数；
 - `work_full`、`work_resolved` 和 `regime`；
-- 式 (2) 的 `pi`、`s_bar` 同色标切片及 work 分解残差；
-- QA、manifest、散度报告和 `COMPLETE`；
+- 式 (2) 的 `pi`、`s_bar` 同色标切片，以及当前切片的能量等式残差；
+- 独立的“全域 S̄ QA”页面：三项判据、阈值、通过状态、四场净总量柱状图和原始报告；
+- manifest、输入/散度 QA 和 `COMPLETE` 完整性记录；
 - `x/y/z` 法向与切片 index 选择。
 
 GUI 每次只从 Zarr 读取选中的二维切片，不把整个约 14 GiB 结果载入内存。浏览器只接收当前页面需要的可视化数据，不生成或下载结果归档。按 `Ctrl+C` 只停止 GUI，不影响另一个 Terminal 或 Compute Job 中的计算。

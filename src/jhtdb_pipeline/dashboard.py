@@ -23,6 +23,11 @@ REGIME_COLORS = [
 ]
 GLOBAL_TOTAL_ORDER = ("s_bar", "pi", "work_resolved", "work_full")
 GLOBAL_TOTAL_LABELS = ("ΣS̄", "ΣΠ", "ΣW_res", "ΣW_full")
+SBAR_METRIC_SPECS = (
+    ("identity_residual_rms", "能量等式残差 RMS"),
+    ("s_bar_rel_self", "|ΣS̄| / Σ|S̄|"),
+    ("s_bar_vs_pi_net", "|ΣS̄| / |ΣΠ|"),
+)
 
 
 def complete_result_paths(result_root: Path) -> list[Path]:
@@ -87,6 +92,41 @@ def _global_totals_figure(report: dict):
             hovertemplate="%{x}: %{customdata:.8e}<extra></extra>",
         )
     ).update_layout(title=f"Global net totals ({report['scope']})")
+
+
+def _scientific_text(value) -> str:
+    if value is None:
+        return "不可定义"
+    return f"{float(value):.6e}"
+
+
+def sbar_metric_rows(report: dict) -> list[dict[str, str]]:
+    metrics = report.get("metrics", {})
+    rows = []
+    for key, label in SBAR_METRIC_SPECS:
+        metric = metrics.get(key, {})
+        detail = metric.get("error") or ""
+        if key == "identity_residual_rms" and metric.get("maximum_abs") is not None:
+            detail = f"maximum_abs={_scientific_text(metric['maximum_abs'])}"
+        rows.append(
+            {
+                "判据": label,
+                "值": _scientific_text(metric.get("value")),
+                "阈值（≤）": _scientific_text(metric.get("threshold")),
+                "状态": "通过" if metric.get("passed") else "失败",
+                "说明": detail,
+            }
+        )
+    return rows
+
+
+def energy_identity_residual(
+    work_full: np.ndarray,
+    work_resolved: np.ndarray,
+    pi: np.ndarray,
+    s_bar: np.ndarray,
+) -> np.ndarray:
+    return work_full - work_resolved + pi - s_bar
 
 
 def _symmetric_color_limit(values: np.ndarray, percentile: float = 100.0) -> float:
@@ -200,11 +240,12 @@ def main() -> None:
         f"sigma={result.attrs['sigma_grid']}"
     )
     page = st.sidebar.radio(
-        "页面", ("速度对比", "梯度对比", "Work 与 regime", "Π 与 S̄", "QA")
+        "页面",
+        ("速度对比", "梯度对比", "Work 与 regime", "Π 与 S̄", "全域 S̄ QA"),
     )
     axis = st.sidebar.selectbox("切片法向", ("z", "y", "x"))
     index = None
-    if page != "QA":
+    if page != "全域 S̄ QA":
         indexed_field = (
             result["work_full"]
             if page in ("Work 与 regime", "Π 与 S̄")
@@ -303,15 +344,53 @@ def main() -> None:
                 "式 (2) 符号约定：W_full = W_resolved − Π + S̄；"
                 "常见 LES 定义 Π_conventional = −τ:S = −Π。"
             )
+            full = extract_scalar_slice(result["work_full"], axis, index)
+            resolved = extract_scalar_slice(result["work_resolved"], axis, index)
+            residual = energy_identity_residual(full, resolved, pi, s_bar)
+            st.plotly_chart(
+                _continuous_figure(
+                    residual,
+                    "当前切片能量等式残差 W_full − W_resolved + Π − S̄",
+                    color_percentile=99.0,
+                ),
+                use_container_width=True,
+            )
             st.json(dict(result.attrs.get("decomposition", {})))
     else:
+        st.header("全域 S̄ QA")
         s_bar_qa = selected / "s_bar_qa.json"
         if s_bar_qa.is_file():
             report = json.loads(s_bar_qa.read_text(encoding="utf-8"))
+            if report.get("passed"):
+                st.success("全域 S̄ QA：通过")
+            else:
+                st.error("全域 S̄ QA：失败；正式数据仍保留用于诊断")
+            st.caption(
+                f"{report.get('identity', 'work_full = work_resolved - pi + s_bar')} | "
+                f"scope={report.get('scope')} | points={report.get('point_count', 0):,}"
+            )
+            columns = st.columns(3)
+            for column, (key, label) in zip(columns, SBAR_METRIC_SPECS):
+                metric = report.get("metrics", {}).get(key, {})
+                column.metric(label, _scientific_text(metric.get("value")))
+                status = "通过" if metric.get("passed") else "失败"
+                column.caption(
+                    f"阈值 ≤ {_scientific_text(metric.get('threshold'))} · {status}"
+                )
+            st.dataframe(
+                sbar_metric_rows(report), hide_index=True, use_container_width=True
+            )
             st.plotly_chart(
                 _global_totals_figure(report), use_container_width=True
             )
-            st.json(report)
+            with st.expander("查看 s_bar_qa.json 原始报告"):
+                st.json(report)
+        else:
+            st.warning(
+                "当前正式结果没有 s_bar_qa.json。请选择已完成的 schema v4 结果，"
+                "或对完整 v4 结果运行 qa-sbar。正在计算的 staging 不会进入 GUI。"
+            )
+        st.subheader("完整性与其他 QA 记录")
         for filename in ("manifest.json", "qa.json", "divergence.json", "COMPLETE"):
             path = selected / filename
             st.subheader(filename)
