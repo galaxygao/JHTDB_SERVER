@@ -27,7 +27,8 @@ SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERV
 - 中心 `[256:768)^3` 裁剪；
 - 服务器 persistent 中的 Zarr 正式结果；
 - 全域无散度检查、shape/dtype/有限值检查和逐字段 SHA-256；
-- 可重复运行的全域 S̄ QA、三层判据和四场净总量柱状图；
+- 可重复运行的全域 S̄ QA、两项判据和四场净总量柱状图；
+- 全域 Q1–Q4 的 Cq 分解、stored/LES 双符号报告及四项 closure 自检；
 - staging 到正式结果的原子提交和 `COMPLETE` 标记；
 - Streamlit + Plotly 只读服务器 GUI，按需读取二维切片。
 
@@ -95,6 +96,16 @@ work_full = work_resolved - pi + s_bar
 
 `regime` 在全周期域根据两种 work 相对于各自全域 RMS 阈值的正负组合编码为 uncertain、Q1、Q2、Q3、Q4。
 
+全域 Cq 使用已保存的 `pi`、`work_full` 和 `work_resolved`，按零阈值符号划分四个完备区域：
+
+```text
+Cq_stored = mean(pi * I[(sign(work_full), sign(work_resolved)) in Qq])
+Cq_LES    = -Cq_stored
+C1 + C2 + C3 + C4 = mean(pi)
+```
+
+零值归入非负侧，因此 Q1–Q4 覆盖每个全域点并可做严格四项 closure。用于可视化的 thresholded `regime` 仍可包含 uncertain，但不参与 Cq 划分。`pi=tau:S` 是项目存储符号；常见 LES 正向通量为 `Pi_LES=-tau:S=-pi`。报告同时保存每个区域的点数、体积分数、`pi` 总和、对全域均值的贡献和条件均值。
+
 ## 2. 配置、安装与使用
 
 本节集中给出从创建容器到查看结果所需的全部配置和命令。除非特别说明，所有命令都在 SciServer 上执行。
@@ -156,7 +167,8 @@ token：
 | storage | `compression_threads` | 8 个压缩线程 |
 | storage | safety reserve | persistent 15 GiB、scratch 16 GiB |
 | validation | divergence thresholds | 原始和滤波速度各自的相对 RMS `1e-4`、相对最大值 `1e-3` |
-| validation | S̄ QA thresholds | 能量等式 RMS `1e-4`、`S_bar_rel_self` `1e-4`、`S_bar_vs_Pi_net` `1e-2` |
+| validation | S̄ QA thresholds | 能量等式 RMS `1e-4`、`S_bar_vs_Pi_net` `1e-2`；不计算 `Σ|S̄|` 绝对归一化判据 |
+| validation | `cq_partition_relative_max` | C1–C4 closure 相对 `Σ|pi|` 的残差上限，默认 `1e-12` |
 | physics | `sigma_grid` | 高斯标准差列表；默认生产配置为 `[1.0,2.0,3.0]` 个网格间距 |
 | physics | `crop_start`, `crop_shape` | `[256,256,256]`, `[512,512,512]` |
 | physics | `epsilon_abs`, `epsilon_rel` | regime 不确定区阈值参数 |
@@ -350,6 +362,9 @@ python -m jhtdb_pipeline upgrade-result --time-index 1 --config configs/pipeline
 # 对完整当前 schema 的四场重复运行全域 S_bar QA 和柱状图
 python -m jhtdb_pipeline qa-sbar --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
+# 只读完整结果的全域 pi/work 字段，计算或重算四项 Cq closure
+python -m jhtdb_pipeline compute-cq --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+
 # 查看输入和正式结果状态
 python -m jhtdb_pipeline status --config configs/pipeline.yaml
 ```
@@ -368,9 +383,10 @@ CLI 命令汇总：
 | `finalize-result` | 否 | 字段级验证并提交正式结果 |
 | `backfill-full-fields` | 否 | 复用 temporary 数据，把已有 v2/v3 结果补算成当前全域 schema |
 | `backfill-full-regime` | 否 | 只读 v4 persistent 全域 work 字段，快速补齐全域 regime |
-| `qa-sbar` | 否 | 读取当前全域四场，重算三层 S̄ QA 与净总量柱状图 |
+| `qa-sbar` | 否 | 读取当前全域四场，重算两项 S̄ QA 与净总量柱状图 |
+| `compute-cq` | 否 | 逐 chunk 读取全域 pi/work，计算 Q1–Q4 的 stored/LES Cq 和四项 closure |
 | `upgrade-result` | 否 | 自动选择 v4 regime 快速补齐或 v2/v3 全场补算 |
-| `single-frame` | 按需 | 已有 v4/v5 不访问 JHTDB；缺少完整结果时串联单帧流程 |
+| `single-frame` | 按需 | 已有 v4/v5 不访问 JHTDB，并自动补齐新版 S̄/Cq 报告；缺少完整结果时串联单帧流程 |
 | `status` | 否 | 输入缓存和正式结果状态 |
 | `gui` | 否 | 启动只读服务器 GUI |
 
@@ -393,11 +409,12 @@ GUI 监听 `0.0.0.0:8501`，支持：
 - 梯度线性或 SymLog 色标和显示分位数；
 - `work_full`、`work_resolved` 和 `regime`；
 - 式 (2) 的 `pi`、`s_bar` 同色标切片，以及当前切片的能量等式残差；
-- 独立的“全域 S̄ QA”页面：三项判据、阈值、通过状态、四场净总量柱状图和原始报告；
+- 独立的“全域 S̄ QA”页面：两项判据、阈值、通过状态、四场净总量柱状图和原始报告；
+- 独立的“Cq 分解”页面：Q1–Q4 占比、贡献、条件均值、双符号柱状图和四项 closure；
 - manifest、输入/散度 QA 和 `COMPLETE` 完整性记录；
 - `x/y/z` 法向与切片 index 选择。
 
-GUI 每次只从 Zarr 读取选中的二维切片，不把整个约 14 GiB 结果载入内存。浏览器只接收当前页面需要的可视化数据，不生成或下载结果归档。按 `Ctrl+C` 只停止 GUI，不影响另一个 Terminal 或 Compute Job 中的计算。
+GUI 每次只从 Zarr 读取选中的二维切片，不把整个约 29 GiB 未压缩结果载入内存。浏览器只接收当前页面需要的可视化数据，不生成或下载结果归档。按 `Ctrl+C` 只停止 GUI，不影响另一个 Terminal 或 Compute Job 中的计算。
 
 需要通过当前 SciServer compute domain 提供的端口入口访问。若该 domain 不提供 Streamlit 端口代理，当前版本不会回退到本地 GUI；应增加服务器端 Jupyter 内嵌 viewer。
 
@@ -419,24 +436,28 @@ JHU_DATA/
 │   ├── catalog.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── cq.py
 │   ├── dashboard.py
 │   ├── doctor.py
 │   ├── jhtdb.py
 │   ├── physics.py
 │   ├── planning.py
 │   ├── processing.py
+│   ├── sbar_qa.py
 │   ├── store.py
 │   └── validation.py
 ├── tests/
 │   ├── test_auth.py
 │   ├── test_catalog_store.py
 │   ├── test_coordinates.py
+│   ├── test_cq.py
 │   ├── test_dashboard.py
 │   ├── test_doctor.py
 │   ├── test_fetch.py
 │   ├── test_physics.py
 │   ├── test_planning.py
-│   └── test_processing.py
+│   ├── test_processing.py
+│   └── test_sbar_qa.py
 ├── dashboard.py
 ├── pyproject.toml
 ├── README.md
@@ -471,7 +492,8 @@ JHU_DATA/
 | `physics.py` | 谱导数、谱高斯滤波、分轴 slab FFT、memmap、乘积累积和 regime 编码 |
 | `planning.py` | 生成 8 个 request、512 个 checksum tile、JHTDB 一基坐标范围和资源计划 |
 | `processing.py` | 完整域滤波/梯度/四场计算、中心字段裁剪、复用/backfill、staging 和正式结果提交 |
-| `sbar_qa.py` | 流式读取全域四场，计算 S̄ 三层 QA，并写 JSON 与 Plotly 柱状图 |
+| `sbar_qa.py` | 流式读取全域四场，计算 S̄ 两项 QA，并写 JSON 与 Plotly 柱状图 |
+| `cq.py` | 流式读取全域 pi/work，计算 Q1–Q4 Cq、LES 符号结果和四项 closure |
 | `store.py` | Zarr schema、Blosc/Zstd 压缩、tile 回读 checksum、结果字段哈希和只读打开规则 |
 | `validation.py` | 输入覆盖/重叠/有限值/接缝验证、manifest hash 和原子 JSON 写入 |
 
@@ -484,13 +506,14 @@ JHU_DATA/
 | `test_auth.py` | token 来源、空 token、缺失 token、权限约束和不泄露行为 |
 | `test_catalog_store.py` | catalog 唯一性、tile 写入/回读和小型完整 snapshot |
 | `test_coordinates.py` | Giverny 轴转换、request/tile 分割、一基 API 范围和周期坐标 |
-| `test_dashboard.py` | 中心/全域切片映射、柱状图、颜色范围、SymLog 和 COMPLETE 过滤 |
+| `test_dashboard.py` | 中心/全域切片、S̄/Cq 柱状图、颜色范围、SymLog 和 COMPLETE 过滤 |
 | `test_doctor.py` | scratch 运行记录过期时拒绝继续 |
 | `test_fetch.py` | 大 request 拆分、checksum tile 持久化和断点续跑 |
 | `test_physics.py` | 周期谱导数、高斯常量保持、全部梯度轴、流式滤波等价性和 regime |
 | `test_planning.py` | 8 个请求、512 个无重叠 tile、严格串行计划和完整覆盖 |
 | `test_processing.py` | 小型端到端全域四场、temporary 复用、正式提交和散度失败门槛 |
-| `test_sbar_qa.py` | 三层 S̄ 判据、全域净和、零分母 JSON 安全和图表产物 |
+| `test_sbar_qa.py` | 两项 S̄ 判据、全域净和、零分母 JSON 安全和图表产物 |
+| `test_cq.py` | Q1–Q4 完整分区、stored/LES 符号、空区域 JSON 安全和四项 closure |
 
 ### 3.5 文档与平台资料
 
@@ -540,10 +563,10 @@ python -m unittest discover -s tests -v
 - 原始速度和滤波速度各自的全域相对无散度 RMS 不超过 `1e-4`；
 - 原始速度和滤波速度各自的全域相对最大散度不超过 `1e-3`；
 - 全域能量等式残差 RMS 不超过 `1e-4`；
-- `|ΣS̄|/Σ|S̄|` 不超过 `1e-4`，且 `|ΣS̄|/|ΣΠ|` 不超过 `1e-2`；
+- `|ΣS̄|/|ΣΠ|` 不超过 `1e-2`；不使用 `Σ|S̄|` 绝对归一化判据；
 - regime 阈值和 occupancy 写入 QA。
 
-`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套全域统计。`s_bar_qa.json` 记录四个全域净和、绝对和、能量等式残差以及两个 S̄ 比率；`s_bar_global_totals.html` 是可离线打开的四柱图。`qa-sbar` 只接受当前全域结果 schema，旧中心结果不能冒充全域 QA。`process-center` 在任一速度场散度验证失败时保留失败 staging，不创建 `COMPLETE`；S̄ QA 失败会保留全域数据供诊断，并在 attrs/QA 中明确标记失败。
+`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套全域统计。`s_bar_qa.json` 记录四个全域净和、能量等式残差以及 `|ΣS̄|/|ΣΠ|`；不再计算 `Σ|S̄|` 绝对归一化 QA。`s_bar_global_totals.html` 是可离线打开的四柱图。`cq.json` 和 `cq.html` 记录 Q1–Q4 的 stored/LES 贡献、条件均值、占比和四项 closure。`qa-sbar` 与 `compute-cq` 只接受当前全域结果 schema。`process-center` 在任一速度场散度验证失败时保留失败 staging，不创建 `COMPLETE`；QA 失败会保留全域数据供诊断，并在 attrs/QA 中明确标记失败。
 
 ### 4.4 输出 Review 与提交规则
 
@@ -554,6 +577,7 @@ python -m unittest discover -s tests -v
 - 最小值、最大值、字节数和完整 SHA-256 计算；
 - `manifest.json`、`qa.json` 和 `divergence.json` 一致性记录；
 - `s_bar_qa.json` 与 `s_bar_global_totals.html`；
+- `cq.json` 与 `cq.html`；
 - staging 到正式目录的同文件系统原子 rename；
 - 最后创建包含 manifest hash 的 `COMPLETE`。
 
@@ -574,6 +598,8 @@ qa.json
 divergence.json
 s_bar_qa.json
 s_bar_global_totals.html
+cq.json
+cq.html
 center_result_sigma_<sigma_tag>.zarr/
 ```
 
@@ -628,6 +654,8 @@ results/t000001_sigma_1/
 ├── divergence.json
 ├── s_bar_qa.json
 ├── s_bar_global_totals.html
+├── cq.json
+├── cq.html
 └── COMPLETE
 ```
 
@@ -659,6 +687,7 @@ results/t000001_sigma_1/
 | v2/v3 需要全域四场 | 运行 `backfill-full-fields`；复用 filtered workspace 或 raw cache，不自动 fetch |
 | v4 需要全域 regime | 运行 `backfill-full-regime`；只读 persistent 全域 work 字段，不需要 temporary 或 FFT |
 | `qa-sbar` 失败 | 保留全域数据和报告，检查 `s_bar_qa.json`，命令返回非零 |
+| `compute-cq` 失败 | 保留正式字段，检查四项 closure、全域 work/pi 有限值和 `cq.json`，命令返回非零 |
 | 散度失败 | staging 保留诊断数据，不创建 `COMPLETE` |
 | `finalize-result` 前失败 | GUI 不显示 staging |
 | persistent 空间不足 | 停止新任务并核对 Quotas，不覆盖或静默删除正式结果 |

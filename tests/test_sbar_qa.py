@@ -41,7 +41,7 @@ def fixture(root_path: Path, *, contaminated: bool = False, zero_pi: bool = Fals
 
 
 class SBarQATests(unittest.TestCase):
-    def test_three_global_checks_pass_and_artifacts_are_written(self) -> None:
+    def test_two_global_checks_pass_and_artifacts_are_written(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)
             cfg, root = fixture(path)
@@ -51,18 +51,19 @@ class SBarQATests(unittest.TestCase):
             self.assertLess(
                 report["metrics"]["identity_residual_rms"]["value"], 1.0e-7
             )
+            self.assertNotIn("s_bar_rel_self", report["metrics"])
+            self.assertNotIn("global_absolute_totals", report)
             json.dumps(report, allow_nan=False)
             digest = write_sbar_artifacts(path, report)
             self.assertEqual(len(digest), 64)
             self.assertTrue((path / "s_bar_qa.json").is_file())
             self.assertTrue((path / "s_bar_global_totals.html").is_file())
 
-    def test_net_s_bar_contamination_fails_both_ratio_checks(self) -> None:
+    def test_net_s_bar_contamination_fails_vs_pi_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cfg, root = fixture(Path(temporary), contaminated=True)
             report = compute_sbar_qa(root, cfg, scope="full_domain")
             self.assertFalse(report["passed"])
-            self.assertFalse(report["metrics"]["s_bar_rel_self"]["passed"])
             self.assertFalse(report["metrics"]["s_bar_vs_pi_net"]["passed"])
 
     def test_zero_pi_denominator_is_json_safe_and_fails(self) -> None:

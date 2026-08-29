@@ -93,6 +93,8 @@ class ProcessingTests(unittest.TestCase):
             self.assertTrue((final / "manifest.json").is_file())
             self.assertTrue((final / "s_bar_qa.json").is_file())
             self.assertTrue((final / "s_bar_global_totals.html").is_file())
+            self.assertTrue((final / "cq.json").is_file())
+            self.assertTrue((final / "cq.html").is_file())
             self.assertEqual(run_sbar_qa(cfg, 1)["scope"], "full_domain")
             result = open_complete_result(final)
             self.assertEqual(result["velocity"].shape, (3, 8, 8, 8))
@@ -159,7 +161,10 @@ class ProcessingTests(unittest.TestCase):
             manifest = json.loads((final / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["schema_version"], 5)
             self.assertEqual(manifest["field_scopes"]["regime"], "full_domain")
+            self.assertEqual(manifest["s_bar_qa_report_version"], 2)
             self.assertIn("s_bar_qa_report_hash", manifest)
+            self.assertTrue(manifest["cq_passed"])
+            self.assertIn("cq_report_hash", manifest)
             self.assertEqual(
                 json.loads((final / "COMPLETE").read_text(encoding="utf-8"))[
                     "manifest_hash"
@@ -170,6 +175,23 @@ class ProcessingTests(unittest.TestCase):
                 "velocity", "gradient", "velocity_bar", "gradient_bar",
                 "work_full", "work_resolved", "pi", "s_bar", "regime",
             })
+            for name in (
+                "s_bar_qa.json",
+                "s_bar_global_totals.html",
+                "cq.json",
+                "cq.html",
+            ):
+                (final / name).unlink()
+            shutil.rmtree(cfg.raw_store_path(1))
+            self.assertEqual(process_center(cfg, 1), final)
+            refreshed_s_bar = json.loads(
+                (final / "s_bar_qa.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(refreshed_s_bar["report_version"], 2)
+            self.assertNotIn("s_bar_rel_self", refreshed_s_bar["metrics"])
+            self.assertTrue((final / "s_bar_global_totals.html").is_file())
+            self.assertTrue((final / "cq.json").is_file())
+            self.assertTrue((final / "cq.html").is_file())
 
     def test_legacy_complete_result_is_replaced_only_after_new_staging(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -290,7 +312,12 @@ class ProcessingTests(unittest.TestCase):
             manifest["schema_version"] = 4
             manifest["field_scopes"]["regime"] = "center_crop"
             manifest["fields"]["regime"]["shape"] = list(cfg.result_shape_zyx)
+            for key in ("cq_passed", "cq_report_version", "cq_report_hash"):
+                manifest.pop(key, None)
+                root.attrs.pop(key, None)
             atomic_json(manifest_path, manifest)
+            (final / "cq.json").unlink()
+            (final / "cq.html").unlink()
             shutil.rmtree(cfg.raw_store_path(1))
 
             upgraded = backfill_full_regime(cfg, 1)
@@ -307,6 +334,8 @@ class ProcessingTests(unittest.TestCase):
                 qa["reuse"]["regime"],
                 "persistent_schema_v4_full_work_fields",
             )
+            self.assertTrue((final / "cq.json").is_file())
+            self.assertTrue((final / "cq.html").is_file())
             self.assertFalse(any(final.glob(".*regime-v4-backup*")))
 
     def test_backfill_never_fetches_when_temporary_raw_cache_is_missing(self) -> None:

@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from .config import RESULT_SCHEMA_VERSION, PipelineConfig, result_zarr_name
+from .cq import compute_cq, ensure_cq_result, write_cq_artifacts
 from .physics import (
     ComponentView,
     ProductView,
@@ -25,7 +26,7 @@ from .physics import (
     zero_field,
 )
 from .store import create_result_group, hash_zarr_array
-from .sbar_qa import compute_sbar_qa, write_sbar_artifacts
+from .sbar_qa import compute_sbar_qa, ensure_sbar_result, write_sbar_artifacts
 from .validation import atomic_json, input_manifest_hash
 
 
@@ -861,6 +862,8 @@ def process_center(
     regime_report = _write_full_regime(
         result["work_full"], result["work_resolved"], result["regime"], cfg
     )
+    cq_report = compute_cq(result, cfg)
+    cq_report_hash = write_cq_artifacts(staging, cq_report)
 
     qa = {
         "dataset": cfg.dataset,
@@ -872,6 +875,7 @@ def process_center(
         "s_bar_global": {
             "passed": s_bar_report["passed"],
             "scope": s_bar_report["scope"],
+            "report_version": s_bar_report["report_version"],
             "report_hash": s_bar_report_hash,
             "metrics": s_bar_report["metrics"],
         },
@@ -885,6 +889,13 @@ def process_center(
         "regime_scope": regime_report["scope"],
         "regime_point_count": regime_report["point_count"],
         "occupancy": regime_report["occupancy"],
+        "cq": {
+            "passed": cq_report["passed"],
+            "scope": cq_report["scope"],
+            "report_version": cq_report["report_version"],
+            "report_hash": cq_report_hash,
+            "partition_check": cq_report["partition_check"],
+        },
     }
     atomic_json(staging / "qa.json", qa)
     result.attrs.update(
@@ -894,8 +905,12 @@ def process_center(
             "epsilon_resolved": regime_report["epsilon_resolved"],
             "occupancy": qa["occupancy"],
             "regime_scope": regime_report["scope"],
+            "cq_passed": cq_report["passed"],
+            "cq_report_version": cq_report["report_version"],
+            "cq_report_hash": cq_report_hash,
             "decomposition": decomposition_report,
             "s_bar_qa_passed": s_bar_report["passed"],
+            "s_bar_qa_report_version": s_bar_report["report_version"],
             "s_bar_qa_report_hash": s_bar_report_hash,
             "reused_filtered_velocity": reused_filtered_velocity,
         }
@@ -965,7 +980,11 @@ def finalize_result(
         "full_shape_xyz": list(cfg.grid_shape),
         "field_scopes": dict(root.attrs.get("field_scopes", {})),
         "s_bar_qa_passed": bool(root.attrs.get("s_bar_qa_passed", False)),
+        "s_bar_qa_report_version": root.attrs.get("s_bar_qa_report_version"),
         "s_bar_qa_report_hash": root.attrs.get("s_bar_qa_report_hash"),
+        "cq_passed": bool(root.attrs.get("cq_passed", False)),
+        "cq_report_version": root.attrs.get("cq_report_version"),
+        "cq_report_hash": root.attrs.get("cq_report_hash"),
         "fields": fields,
     }
     manifest_hash = atomic_json(staging / "manifest.json", manifest)
@@ -1182,7 +1201,9 @@ def backfill_full_regime(
     cfg.lock_path.mkdir(parents=True, exist_ok=True)
     lock_name = f"backfill-full-regime-{cfg.result_id(time_index, sigma)}.lock"
     with FileLock(str(cfg.lock_path / lock_name), timeout=0):
-        return _backfill_full_regime_locked(cfg, time_index, sigma)
+        result = _backfill_full_regime_locked(cfg, time_index, sigma)
+    ensure_sbar_result(cfg, time_index, sigma)
+    return ensure_cq_result(cfg, time_index, sigma)
 
 
 def reuse_or_backfill_result(
@@ -1194,7 +1215,8 @@ def reuse_or_backfill_result(
     final = cfg.result_path(time_index, sigma)
     _recover_or_cleanup_regime_upgrade(cfg, final, sigma)
     if _complete_result_is_current(cfg, final, sigma):
-        return final
+        ensure_sbar_result(cfg, time_index, sigma)
+        return ensure_cq_result(cfg, time_index, sigma)
     if _complete_result_schema(final, sigma) == 4:
         return backfill_full_regime(cfg, time_index, sigma)
     return None

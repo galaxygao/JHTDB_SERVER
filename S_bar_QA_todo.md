@@ -1,6 +1,6 @@
 # S̄ 全域 QA — 待办与理由
 
-> 后续变更：schema v5 已把 `regime` 从中心 `512³` 扩展为全周期域 `1024³`。下文关于 schema v4 保持中心 regime 的内容是当时的实施边界；已有 v4 可直接复用 persistent 全域 `work_full/work_resolved` 快速补齐，新计算与 `single-frame` 均永久保存全域 regime。
+> 后续变更：schema v5 已把 `regime` 从中心 `512³` 扩展为全周期域 `1024³`。下文关于 schema v4 保持中心 regime 的内容是当时的实施边界；已有 v4 可直接复用 persistent 全域 `work_full/work_resolved` 快速补齐，新计算与 `single-frame` 均永久保存全域 regime。S̄ 的 `|ΣS̄|/Σ|S̄|` 绝对归一化 QA 后续已删除，只保留能量等式和相对净 `Π` 判据。Cq 已改为零阈值符号 Q1–Q4 完备划分，并执行 `C1+...+C4=mean(pi)` closure。
 
 ## 目标
 在**全周期域**上验证 S̄ = ∂ⱼ(ūᵢτᵢⱼ) 的散度归零性质，确认其残余不污染净级串 ⟨Π⟩，并把四个量的全域总量可视化。
@@ -12,23 +12,20 @@ W_full、W_res、Π、S̄ 都保留**全域**（不再 crop 到中心子域）�
 
 理由：
 - 这四个是要长期复用、进 QA 和 C_q 分解、还驱动可视化的正式结果，属于"最终结果"，本就该放有备份的 persistent。
-- 全域存下来后，所有全域判据（ΣS̄、ΣΠ、rel_self、vs_Pi_net）**随时可事后补算**，不再依赖跑的时候有没有算好标量、也不用为漏存而重跑。
+- 全域存下来后，净量判据（ΣS̄、ΣΠ、vs_Pi_net）**随时可事后补算**，不再依赖跑的时候有没有算好标量、也不用为漏存而重跑。
 - C_q 分解可直接在全域做，消除子域边界污染与代表性问题。
 
-### 2. 独立 QA 脚本，读全域四场，算三层判据 + 出一张柱状图
+### 2. 独立 QA 脚本，读全域四场，算两项判据 + 出一张柱状图
 和主 pipeline 解耦：主 pipeline 只负责"全域存四场"；QA 单独跑、可重复跑、可对已有结果补跑。
 
-## 三层判据
+## 两项判据
 
 | 指标 | 表达式 | 回答 | 通过阈值 |
 |---|---|---|---|
 | 逐点预算残差 | `W_full = W_res − Π + S̄` 的全域 rms | pipeline 逐点是否正确（**数值**） | ~1e-4 以下 |
-| `S_bar_rel_self` | ΣS̄ / Σ\|S̄\| | S̄ 散度/周期性算得对不对（**数值**） | ~1e-4 以下 |
 | `S_bar_vs_Pi_net` | \|ΣS̄\| / \|ΣΠ\| | S̄ 残余会不会污染净级串（**科学**）★决定性 | << 1（~1e-2 以下） |
 
-判读关键（别踩的坑）：
-- **A 通过 ≠ B 通过。** 因为 Σ\|S̄\| ≫ Σ\|Π\|（S̄ 逐点量级远大于 Π），A 的分母大、容易被稀释成很小；不能用 A 的"干净"给 B 背书。
-- **B 才是决定性的。** 净 ⟨Π⟩ 本就很小（weak asymmetry），若 ΣS̄ 残余与 ΣΠ 同量级，C_q 分解分辨出的"净贡献"可能混入 S̄ 漏项 → 净通量结论悬空。
+判读关键：净 ⟨Π⟩ 本就很小（weak asymmetry），若 ΣS̄ 残余与 ΣΠ 同量级，C_q 分解分辨出的"净贡献"可能混入 S̄ 漏项，因此直接使用净量之比，不再使用容易稀释残差的 Σ\|S̄\| 绝对归一化判据。
 - 分母用**同一口径**（都不带绝对值的全域求和）比，避免用 Σ\|Π\| 稀释掉 B。
 
 ## 柱状图
@@ -72,9 +69,9 @@ W_full、W_res、Π、S̄ 都保留**全域**（不再 crop 到中心子域）�
 
 ### D. 独立 S̄ QA 命令
 
-新增 `qa-sbar --time-index N [--sigma-grid S]`，只读取 complete v4 的四个全域字段，逐 Zarr chunk、用 float64 累加，输出到同一正式结果目录：
+新增 `qa-sbar --time-index N [--sigma-grid S]`，只读取当前 complete schema 的四个全域字段，逐 Zarr chunk、用 float64 累加，输出到同一正式结果目录：
 
-- `s_bar_qa.json`：记录字段 hash/manifest hash、点数、四个净和、绝对和、RMS、三层指标、阈值、逐项 passed 和总 passed；
+- `s_bar_qa.json`：记录字段 hash/manifest hash、点数、四个净和、能量等式 RMS、净量比、阈值、逐项 passed 和总 passed；
 - `s_bar_global_totals.html`：Plotly 四柱图，柱为 `ΣS̄`、`ΣΠ`、`ΣW_res`、`ΣW_full`，hover 同时显示科学计数法数值；
 - `qa.json`：只写入上述报告的摘要和报告 hash，保留已有 divergence、occupancy 等内容。
 
@@ -83,11 +80,10 @@ W_full、W_res、Π、S̄ 都保留**全域**（不再 crop 到中心子域）�
 ```text
 residual = work_full - (work_resolved - pi + s_bar)
 identity_residual_rms = sqrt(Σ residual² / N)
-s_bar_rel_self = |Σ s_bar| / Σ |s_bar|
 s_bar_vs_pi_net = |Σ s_bar| / |Σ pi|
 ```
 
-默认阈值分别为 `1e-4`、`1e-4`、`1e-2`，写入 config 的 validation 段并严格校验。若分母为零：分子也为零则比值记为 `0`，否则记为 `null`、判定失败并在报告注明原因，JSON 中不写 NaN/Inf。
+默认阈值分别为 `1e-4`、`1e-2`，写入 config 的 validation 段并严格校验。若净 `pi` 分母为零：分子也为零则比值记为 `0`，否则记为 `null`、判定失败并在报告注明原因，JSON 中不写 NaN/Inf。
 
 旧 v3 允许用同一计算器输出 `scope=center_crop` 的诊断预览，但不得命名为全域 QA、不得升级为 v4，也不得让正式 `qa-sbar` 返回成功。
 
@@ -95,7 +91,7 @@ s_bar_vs_pi_net = |Σ s_bar| / |Σ pi|
 
 1. sidebar 的切片 index 改为按当前页面字段 shape 生成：速度/梯度/regime 使用中心 `512³`，四个 work/Π/S̄ 页面使用全域 `1024³`。
 2. 全域四场切片显示全域 index；与中心字段联合显示时，把全域数组裁到 `crop_start/crop_shape` 后再比较，禁止直接用同一局部 index 读取两个不同坐标域。
-3. QA 页面读取 `s_bar_qa.json`，展示三层判据、scope、pass/fail 和同一张四柱图；dashboard 保持只读，不在页面加载时现场扫描 `1024³`。
+3. QA 页面读取 `s_bar_qa.json`，展示两项判据、scope、pass/fail 和同一张四柱图；dashboard 保持只读，不在页面加载时现场扫描 `1024³`。
 
 ### F. 容量、提交与失败恢复
 
@@ -108,7 +104,7 @@ s_bar_vs_pi_net = |Σ s_bar| / |Σ pi|
 
 1. 小网格端到端测试：验证四场 shape 为全域、其他字段仍为 crop，并逐点验证能量等式。
 2. 复用测试：已有 v4 只跑 QA；v3 + 有效 workspace 跳过滤波；v3 + raw cache 不 fetch；缺少 raw cache 时明确失败；中心重叠不一致时拒绝提交。
-3. QA 单元测试：构造零和/非零和 S̄，分别覆盖三个阈值、零分母和 JSON 无 NaN/Inf。
+3. QA 单元测试：构造零和/非零和 S̄，覆盖两个阈值、零分母和 JSON 无 NaN/Inf。
 4. dashboard 测试：中心/全域 index 映射和柱图数据顺序正确。
 5. 容量测试：核对 `28.125 GiB/尺度` 的公式和三尺度 preflight。
 6. 完整回归通过后更新 README、系统指南与 CLI 帮助；最后在 SciServer 先对一个 sigma 执行 backfill + QA，人工核对报告，再决定是否扩到其余尺度。

@@ -7,10 +7,13 @@ from pathlib import Path
 import numpy as np
 
 from jhtdb_pipeline.dashboard import (
+    _cq_figure,
+    _regime_figure,
     _symmetric_color_limit,
     _symlog_transform,
     _global_totals_figure,
     complete_result_paths,
+    cq_rows,
     energy_identity_residual,
     extract_gradient_slice,
     extract_scalar_slice,
@@ -68,6 +71,32 @@ class DashboardTests(unittest.TestCase):
         figure = _global_totals_figure(report)
         self.assertEqual(list(figure.data[0].y), [1.0, 2.0, 3.0, 4.0])
 
+    def test_cq_figure_and_rows_keep_q1_through_q4_order(self) -> None:
+        report = {
+            "regimes": {
+                name: {
+                    "volume_fraction": index / 10.0,
+                    "stored_cq": float(index),
+                    "les_forward_cq": float(-index),
+                    "stored_conditional_mean_pi": float(index + 10),
+                }
+                for index, name in enumerate(("Q1", "Q2", "Q3", "Q4"), start=1)
+            }
+        }
+        figure = _cq_figure(report)
+        self.assertEqual(list(figure.data[0].y), [1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(list(figure.data[1].y), [-1.0, -2.0, -3.0, -4.0])
+        self.assertEqual(
+            [row["regime"] for row in cq_rows(report)],
+            ["Q1", "Q2", "Q3", "Q4"],
+        )
+
+    def test_regime_figure_keeps_full_domain_without_string_payload(self) -> None:
+        values = np.zeros((1024, 1024), dtype=np.uint8)
+        figure = _regime_figure(values, "regime")
+        self.assertEqual(figure.data[0].z.shape, (1024, 1024))
+        self.assertIsNone(figure.data[0].customdata)
+
     def test_sbar_metric_rows_expose_thresholds_and_status(self) -> None:
         report = {
             "metrics": {
@@ -76,12 +105,6 @@ class DashboardTests(unittest.TestCase):
                     "maximum_abs": 3.0e-3,
                     "threshold": 1.0e-4,
                     "passed": True,
-                },
-                "s_bar_rel_self": {
-                    "value": 4.0e-6,
-                    "threshold": 1.0e-4,
-                    "passed": True,
-                    "error": None,
                 },
                 "s_bar_vs_pi_net": {
                     "value": None,
@@ -92,9 +115,9 @@ class DashboardTests(unittest.TestCase):
             }
         }
         rows = sbar_metric_rows(report)
-        self.assertEqual([row["状态"] for row in rows], ["通过", "通过", "失败"])
-        self.assertEqual(rows[2]["值"], "不可定义")
-        self.assertEqual(rows[2]["说明"], "denominator is zero")
+        self.assertEqual([row["状态"] for row in rows], ["通过", "失败"])
+        self.assertEqual(rows[1]["值"], "不可定义")
+        self.assertEqual(rows[1]["说明"], "denominator is zero")
         self.assertIn("maximum_abs=", rows[0]["说明"])
 
     def test_energy_identity_residual_uses_documented_signs(self) -> None:

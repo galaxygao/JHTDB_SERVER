@@ -10,6 +10,7 @@ from pathlib import Path
 from .auth import has_token, token_source
 from .catalog import Catalog
 from .config import load_config
+from .cq import run_cq
 from .doctor import doctor
 from .jhtdb import fetch_snapshot, smoke
 from .planning import plan
@@ -70,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
         "upgrade-result",
         "backfill-full-fields",
         "backfill-full-regime",
+        "compute-cq",
         "qa-sbar",
     ):
         command = commands.add_parser(name)
@@ -107,6 +109,7 @@ def _status(cfg) -> dict[str, object]:
                         "manifest_status": manifest.get("status"),
                         "schema_version": manifest.get("schema_version"),
                         "s_bar_qa_passed": manifest.get("s_bar_qa_passed"),
+                        "cq_passed": manifest.get("cq_passed"),
                     }
                 )
             results.append(item)
@@ -217,6 +220,19 @@ def main(argv: list[str] | None = None) -> int:
                     for sigma in _selected_sigmas(cfg, args.sigma_grid)
                 ]
             )
+        elif args.command == "compute-cq":
+            reports = [
+                run_cq(cfg, args.time_index, sigma)
+                for sigma in _selected_sigmas(cfg, args.sigma_grid)
+            ]
+            print(
+                json.dumps(
+                    reports[0] if len(reports) == 1 else reports,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0 if all(report["passed"] for report in reports) else 2
         elif args.command == "qa-sbar":
             reports = [
                 run_sbar_qa(cfg, args.time_index, sigma)

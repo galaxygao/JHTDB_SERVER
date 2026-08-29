@@ -25,9 +25,9 @@ GLOBAL_TOTAL_ORDER = ("s_bar", "pi", "work_resolved", "work_full")
 GLOBAL_TOTAL_LABELS = ("ΣS̄", "ΣΠ", "ΣW_res", "ΣW_full")
 SBAR_METRIC_SPECS = (
     ("identity_residual_rms", "能量等式残差 RMS"),
-    ("s_bar_rel_self", "|ΣS̄| / Σ|S̄|"),
     ("s_bar_vs_pi_net", "|ΣS̄| / |ΣΠ|"),
 )
+CQ_REGIME_ORDER = ("Q1", "Q2", "Q3", "Q4")
 
 
 def complete_result_paths(result_root: Path) -> list[Path]:
@@ -123,6 +123,44 @@ def energy_identity_residual(
     return work_full - work_resolved + pi - s_bar
 
 
+def _cq_figure(report: dict):
+    regimes = report["regimes"]
+    figure = go.Figure()
+    figure.add_bar(
+        name="stored Cq (pi=tau:S)",
+        x=list(CQ_REGIME_ORDER),
+        y=[regimes[name]["stored_cq"] for name in CQ_REGIME_ORDER],
+    )
+    figure.add_bar(
+        name="LES-forward Cq (-tau:S)",
+        x=list(CQ_REGIME_ORDER),
+        y=[regimes[name]["les_forward_cq"] for name in CQ_REGIME_ORDER],
+    )
+    return figure.update_layout(
+        title="Full-domain C_q decomposition",
+        barmode="group",
+        yaxis_title="contribution to domain mean",
+    )
+
+
+def cq_rows(report: dict) -> list[dict[str, str]]:
+    rows = []
+    for name in CQ_REGIME_ORDER:
+        item = report["regimes"][name]
+        rows.append(
+            {
+                "regime": name,
+                "体积分数": _scientific_text(item["volume_fraction"]),
+                "stored Cq": _scientific_text(item["stored_cq"]),
+                "LES-forward Cq": _scientific_text(item["les_forward_cq"]),
+                "stored 条件均值": _scientific_text(
+                    item["stored_conditional_mean_pi"]
+                ),
+            }
+        )
+    return rows
+
+
 def _symmetric_color_limit(values: np.ndarray, percentile: float = 100.0) -> float:
     if not 0.0 < percentile <= 100.0:
         raise ValueError("percentile must be in (0, 100]")
@@ -202,16 +240,14 @@ def _continuous_figure(
 
 def _regime_figure(values: np.ndarray, title: str):
     shown = np.asarray(values, dtype=np.uint8)
-    labels = np.asarray(REGIME_LABELS, dtype=object)[np.clip(shown, 0, 4)]
     figure = go.Figure(
         go.Heatmap(
             z=shown,
-            customdata=labels,
             colorscale=REGIME_COLORS,
             zmin=-0.5,
             zmax=4.5,
             colorbar={"tickvals": [0, 1, 2, 3, 4], "ticktext": list(REGIME_LABELS)},
-            hovertemplate="x=%{x}<br>y=%{y}<br>code=%{z}<br>%{customdata}<extra></extra>",
+            hovertemplate="x=%{x}<br>y=%{y}<br>regime code=%{z}<extra></extra>",
         )
     )
     figure.update_layout(title=title)
@@ -235,11 +271,18 @@ def main() -> None:
     )
     page = st.sidebar.radio(
         "页面",
-        ("速度对比", "梯度对比", "Work 与 regime", "Π 与 S̄", "全域 S̄ QA"),
+        (
+            "速度对比",
+            "梯度对比",
+            "Work 与 regime",
+            "Π 与 S̄",
+            "Cq 分解",
+            "全域 S̄ QA",
+        ),
     )
     axis = st.sidebar.selectbox("切片法向", ("z", "y", "x"))
     index = None
-    if page != "全域 S̄ QA":
+    if page not in ("Cq 分解", "全域 S̄ QA"):
         indexed_field = (
             result["work_full"]
             if page in ("Work 与 regime", "Π 与 S̄")
@@ -344,6 +387,39 @@ def main() -> None:
                 use_container_width=True,
             )
             st.json(dict(result.attrs.get("decomposition", {})))
+    elif page == "Cq 分解":
+        st.header("全域 Cq 分解")
+        cq_path = selected / "cq.json"
+        if cq_path.is_file():
+            report = json.loads(cq_path.read_text(encoding="utf-8"))
+            if report.get("passed"):
+                st.success("Cq 分区恒等式：通过")
+            else:
+                st.error("Cq 分区恒等式：失败")
+            global_values = report["global"]
+            check = report["partition_check"]
+            left, middle, right = st.columns(3)
+            left.metric("mean(pi=tau:S)", _scientific_text(global_values["stored_pi_mean"]))
+            middle.metric(
+                "mean(Pi_LES=-tau:S)",
+                _scientific_text(global_values["les_forward_flux_mean"]),
+            )
+            right.metric(
+                "分区相对残差",
+                _scientific_text(check["relative_to_sum_abs_pi"]),
+            )
+            st.caption(
+                "C1 + C2 + C3 + C4 = mean(pi)；Cq 使用零阈值符号四分区，"
+                "与可视化 regime 的 uncertain 阈值无关。LES-forward 列仅对 stored pi 取反。"
+            )
+            st.plotly_chart(_cq_figure(report), use_container_width=True)
+            st.dataframe(cq_rows(report), hide_index=True, use_container_width=True)
+            with st.expander("查看 cq.json 原始报告"):
+                st.json(report)
+        else:
+            st.warning(
+                "当前正式结果没有 cq.json；运行 compute-cq，或重新执行 single-frame 自动补齐。"
+            )
     else:
         st.header("全域 S̄ QA")
         s_bar_qa = selected / "s_bar_qa.json"
@@ -357,7 +433,7 @@ def main() -> None:
                 f"{report.get('identity', 'work_full = work_resolved - pi + s_bar')} | "
                 f"scope={report.get('scope')} | points={report.get('point_count', 0):,}"
             )
-            columns = st.columns(3)
+            columns = st.columns(len(SBAR_METRIC_SPECS))
             for column, (key, label) in zip(columns, SBAR_METRIC_SPECS):
                 metric = report.get("metrics", {}).get(key, {})
                 column.metric(label, _scientific_text(metric.get("value")))

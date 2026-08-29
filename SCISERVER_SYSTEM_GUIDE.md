@@ -145,6 +145,10 @@ results/
     ├── center_result_sigma_<sigma_tag>.zarr/
     ├── divergence.json
     ├── qa.json
+    ├── s_bar_qa.json
+    ├── s_bar_global_totals.html
+    ├── cq.json
+    ├── cq.html
     ├── manifest.json
     └── COMPLETE
 ```
@@ -349,7 +353,8 @@ python -m jhtdb_pipeline status --config configs/pipeline.yaml
 | `finalize-result --time-index N --sigma-grid S` | 校验 staging 并提交正式结果 |
 | `backfill-full-fields --time-index N --sigma-grid S` | 复用 filtered workspace 或 raw cache，把 v2/v3 补算为当前全域 schema；不自动 fetch |
 | `backfill-full-regime --time-index N --sigma-grid S` | 从 v4 persistent 全域 work 字段快速补齐全域 regime；不做 FFT |
-| `qa-sbar --time-index N --sigma-grid S` | 从当前全域四场重算 S̄ 三层 QA 和柱状图 |
+| `qa-sbar --time-index N --sigma-grid S` | 从当前全域四场重算 S̄ 两项 QA 和柱状图 |
+| `compute-cq --time-index N --sigma-grid S` | 从全域 pi/work 计算 Q1–Q4 Cq、LES 符号贡献和四项 closure |
 | `upgrade-result --time-index N [--sigma-grid S]` | 自动选择 v4 regime 快速补齐或 v2/v3 temporary 补算 |
 | `single-frame --time-index N [--sigma-grid S]` | 串联完整流程；默认批量处理配置列表，指定参数时只跑一个尺度 |
 | `status` | 列出输入和正式/非正式结果状态 |
@@ -365,7 +370,7 @@ source .venv/bin/activate
 python -m jhtdb_pipeline gui --config configs/pipeline.yaml --port 8501
 ```
 
-它监听 `0.0.0.0:8501`，只读取 `persistent/results` 中带 `COMPLETE` 的正式 Zarr，并按需载入二维切片。支持中心 raw/filtered velocity 与 gradient，以及全域 work、`pi`、`s_bar`、regime、QA 和 manifest。
+它监听 `0.0.0.0:8501`，只读取 `persistent/results` 中带 `COMPLETE` 的正式 Zarr，并按需载入二维切片。支持中心 raw/filtered velocity 与 gradient，以及全域 work、`pi`、`s_bar`、regime、Cq 分解、QA 和 manifest。
 
 需要通过当前 SciServer compute domain 提供的端口入口打开。若该 domain 不提供 Streamlit 端口代理，当前 CLI 不会自动建立 Jupyter 内嵌 viewer；应先补充服务器端 viewer，而不是把数据下载到本地。
 
