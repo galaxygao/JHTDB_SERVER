@@ -30,12 +30,12 @@ storage:
 validation:
   divergence_relative_rms_max: 1.0e-4
   divergence_relative_max_max: 1.0e-3
-  energy_identity_rms_max: 1.0e-4
+  energy_identity_relative_rms_max: 1.0e-4
   s_bar_vs_pi_net_max: 1.0e-2
   cq_partition_relative_max: 1.0e-12
 
 physics:
-  sigma_grid: [1.0, 2.0, 3.0]
+  sigma_grid: [2.0]
   crop_start: [256, 256, 256]
   crop_shape: [512, 512, 512]
   epsilon_abs: 0.0

@@ -49,6 +49,11 @@ class CqTests(unittest.TestCase):
             self.assertEqual(report["partition_check"]["sum_quadrant_counts"], 8)
             self.assertTrue(report["partition_check"]["coverage_passed"])
             self.assertTrue(report["partition_check"]["flux_passed"])
+            self.assertTrue(report["weak_asymmetry"]["passed"])
+            self.assertEqual(
+                report["weak_asymmetry"]["positive_backscatter"]["sum"],
+                19.0,
+            )
             for item in report["regimes"].values():
                 self.assertEqual(item["les_forward_cq"], -item["stored_cq"])
             self.assertLessEqual(

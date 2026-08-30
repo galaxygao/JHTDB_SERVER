@@ -90,7 +90,7 @@ class PipelineConfig:
     crop_shape: tuple[int, int, int]
     divergence_relative_rms_max: float
     divergence_relative_max_max: float
-    energy_identity_rms_max: float
+    energy_identity_relative_rms_max: float
     s_bar_vs_pi_net_max: float
     cq_partition_relative_max: float
     sigma_grid: float
@@ -221,7 +221,7 @@ class PipelineConfig:
         if self.divergence_relative_rms_max <= 0 or self.divergence_relative_max_max <= 0:
             raise ValueError("divergence tolerances must be positive")
         if (
-            self.energy_identity_rms_max <= 0
+            self.energy_identity_relative_rms_max <= 0
             or self.s_bar_vs_pi_net_max <= 0
             or self.cq_partition_relative_max <= 0
         ):
@@ -262,7 +262,7 @@ def load_config(path: str | Path) -> PipelineConfig:
     _reject_unknown(auth, {"token_file"}, "auth")
     _reject_unknown(jhtdb, {"request_shape", "tile_shape", "retries", "backoff_seconds", "request_cooldown_seconds"}, "jhtdb")
     _reject_unknown(storage, {"compression_level", "compression_threads", "persistent_capacity_gb_observed", "persistent_safety_reserve_gib", "scratch_safety_reserve_gib"}, "storage")
-    _reject_unknown(validation, {"divergence_relative_rms_max", "divergence_relative_max_max", "energy_identity_rms_max", "s_bar_vs_pi_net_max", "cq_partition_relative_max"}, "validation")
+    _reject_unknown(validation, {"divergence_relative_rms_max", "divergence_relative_max_max", "energy_identity_relative_rms_max", "s_bar_vs_pi_net_max", "cq_partition_relative_max"}, "validation")
     _reject_unknown(physics, {"sigma_grid", "crop_start", "crop_shape", "epsilon_abs", "epsilon_rel", "fft_workers", "fft_slab_width", "cleanup_scratch_on_success"}, "physics")
 
     token_value = auth.get("token_file")
@@ -292,7 +292,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         crop_shape=_tuple3(physics.get("crop_shape", [512, 512, 512]), "physics.crop_shape"),
         divergence_relative_rms_max=float(validation.get("divergence_relative_rms_max", 1.0e-4)),
         divergence_relative_max_max=float(validation.get("divergence_relative_max_max", 1.0e-3)),
-        energy_identity_rms_max=float(validation.get("energy_identity_rms_max", 1.0e-4)),
+        energy_identity_relative_rms_max=float(validation.get("energy_identity_relative_rms_max", 1.0e-4)),
         s_bar_vs_pi_net_max=float(validation.get("s_bar_vs_pi_net_max", 1.0e-2)),
         cq_partition_relative_max=float(validation.get("cq_partition_relative_max", 1.0e-12)),
         sigma_grid=sigma_grids[0],

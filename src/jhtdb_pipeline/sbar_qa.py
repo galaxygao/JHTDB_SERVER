@@ -10,13 +10,15 @@ import numpy as np
 import plotly.graph_objects as go
 import zarr
 from filelock import FileLock
+from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from .config import RESULT_SCHEMA_VERSION, PipelineConfig, result_zarr_name
 from .store import spatial_slices
 from .validation import atomic_json
 
 
-SBAR_REPORT_VERSION = 2
+SBAR_REPORT_VERSION = 3
 FIELD_ORDER = ("s_bar", "pi", "work_resolved", "work_full")
 FIELD_LABELS = {
     "s_bar": "ΣS̄",
@@ -55,34 +57,79 @@ def compute_sbar_qa(
 
     chunks = tuple(int(value) for value in arrays["work_full"].chunks)
     totals = {name: 0.0 for name in FIELD_ORDER}
+    field_sumsq = {name: 0.0 for name in FIELD_ORDER}
     residual_sumsq = 0.0
     residual_maximum = 0.0
     point_count = 0
-    for key in spatial_slices(shape, chunks):
-        values = {
-            name: np.asarray(array[key], dtype=np.float32)
-            for name, array in arrays.items()
-        }
-        if any(not np.all(np.isfinite(block)) for block in values.values()):
-            raise ValueError("the four energy fields contain NaN or Inf")
-        for name, block in values.items():
-            values64 = block.astype(np.float64)
-            totals[name] += float(values64.sum(dtype=np.float64))
-        residual = (
-            values["work_full"].astype(np.float64)
-            - values["work_resolved"].astype(np.float64)
-            + values["pi"].astype(np.float64)
-            - values["s_bar"].astype(np.float64)
+    chunk_count = int(
+        np.prod(
+            [
+                (size + chunk - 1) // chunk
+                for size, chunk in zip(shape, chunks)
+            ],
+            dtype=np.int64,
         )
-        residual_sumsq += float(np.square(residual).sum(dtype=np.float64))
-        residual_maximum = max(
-            residual_maximum, float(np.max(np.abs(residual)))
-        )
-        point_count += residual.size
+    )
+    with Progress(
+        SpinnerColumn("line"),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        "{task.completed}/{task.total}",
+        TimeElapsedColumn(),
+        console=Console(),
+    ) as progress:
+        task = progress.add_task("full-domain S_bar QA", total=chunk_count)
+        for key in spatial_slices(shape, chunks):
+            values = {
+                name: np.asarray(array[key], dtype=np.float32)
+                for name, array in arrays.items()
+            }
+            if any(not np.all(np.isfinite(block)) for block in values.values()):
+                raise ValueError("the four energy fields contain NaN or Inf")
+            values64 = {
+                name: block.astype(np.float64)
+                for name, block in values.items()
+            }
+            for name, block in values64.items():
+                totals[name] += float(block.sum(dtype=np.float64))
+                field_sumsq[name] += float(
+                    np.square(block).sum(dtype=np.float64)
+                )
+            residual = (
+                values64["work_full"]
+                - values64["work_resolved"]
+                + values64["pi"]
+                - values64["s_bar"]
+            )
+            residual_sumsq += float(np.square(residual).sum(dtype=np.float64))
+            residual_maximum = max(
+                residual_maximum, float(np.max(np.abs(residual)))
+            )
+            point_count += residual.size
+            progress.advance(task)
 
     residual_rms = float(np.sqrt(residual_sumsq / point_count))
+    field_rms = {
+        name: float(np.sqrt(value / point_count))
+        for name, value in field_sumsq.items()
+    }
+    joint_energy_rms = float(
+        np.sqrt(sum(field_sumsq.values()) / point_count)
+    )
+    if joint_energy_rms != 0.0:
+        relative_residual = residual_rms / joint_energy_rms
+        relative_error = None
+    elif residual_rms == 0.0:
+        relative_residual = 0.0
+        relative_error = None
+    else:
+        relative_residual = None
+        relative_error = "joint energy RMS is zero while residual RMS is nonzero"
     vs_pi_net, vs_pi_error = _safe_ratio(totals["s_bar"], totals["pi"])
-    identity_passed = residual_rms <= cfg.energy_identity_rms_max
+    identity_passed = (
+        relative_residual is not None
+        and relative_residual <= cfg.energy_identity_relative_rms_max
+    )
     vs_pi_passed = (
         vs_pi_net is not None and vs_pi_net <= cfg.s_bar_vs_pi_net_max
     )
@@ -92,12 +139,17 @@ def compute_sbar_qa(
         "point_count": point_count,
         "identity": "work_full = work_resolved - pi + s_bar",
         "global_totals": totals,
+        "field_sumsq": field_sumsq,
+        "field_rms": field_rms,
         "metrics": {
-            "identity_residual_rms": {
-                "value": residual_rms,
+            "identity_relative_residual_rms": {
+                "value": relative_residual,
+                "residual_rms": residual_rms,
+                "joint_energy_rms": joint_energy_rms,
                 "maximum_abs": residual_maximum,
-                "threshold": cfg.energy_identity_rms_max,
+                "threshold": cfg.energy_identity_relative_rms_max,
                 "passed": identity_passed,
+                "error": relative_error,
             },
             "s_bar_vs_pi_net": {
                 "value": vs_pi_net,
@@ -140,7 +192,7 @@ def _report_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def sbar_report_is_current(result_dir: Path, root: Any) -> bool:
+def _load_chained_report(result_dir: Path, root: Any) -> dict[str, Any] | None:
     path = result_dir / "s_bar_qa.json"
     manifest_path = result_dir / "manifest.json"
     complete_path = result_dir / "COMPLETE"
@@ -150,16 +202,16 @@ def sbar_report_is_current(result_dir: Path, root: Any) -> bool:
         or not manifest_path.is_file()
         or not complete_path.is_file()
     ):
-        return False
+        return None
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         complete = json.loads(complete_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
+        return None
     report_hash = _report_hash(path)
     manifest_hash = _report_hash(manifest_path)
-    return (
+    valid = (
         report.get("report_version") == SBAR_REPORT_VERSION
         and report.get("scope") == "full_domain"
         and manifest.get("s_bar_qa_report_version") == SBAR_REPORT_VERSION
@@ -169,6 +221,88 @@ def sbar_report_is_current(result_dir: Path, root: Any) -> bool:
         and root.attrs.get("manifest_hash") == manifest_hash
         and complete.get("manifest_hash") == manifest_hash
     )
+    return report if valid else None
+
+
+def _reclassify_report(
+    report: dict[str, Any], cfg: PipelineConfig
+) -> dict[str, Any]:
+    metrics = report.get("metrics", {})
+    identity = metrics.get("identity_relative_residual_rms", {})
+    vs_pi = metrics.get("s_bar_vs_pi_net", {})
+    identity_value = identity.get("value")
+    vs_pi_value = vs_pi.get("value")
+    identity_passed = (
+        identity_value is not None
+        and float(identity_value) <= cfg.energy_identity_relative_rms_max
+    )
+    vs_pi_passed = (
+        vs_pi_value is not None
+        and float(vs_pi_value) <= cfg.s_bar_vs_pi_net_max
+    )
+    identity.update(
+        {
+            "threshold": cfg.energy_identity_relative_rms_max,
+            "passed": bool(identity_passed),
+        }
+    )
+    vs_pi.update(
+        {
+            "threshold": cfg.s_bar_vs_pi_net_max,
+            "passed": bool(vs_pi_passed),
+        }
+    )
+    report["passed"] = bool(identity_passed and vs_pi_passed)
+    return report
+
+
+def _can_reclassify(report: dict[str, Any]) -> bool:
+    metrics = report.get("metrics", {})
+    identity = metrics.get("identity_relative_residual_rms", {})
+    vs_pi = metrics.get("s_bar_vs_pi_net", {})
+    return (
+        set(report.get("field_sumsq", {})) == set(FIELD_ORDER)
+        and set(report.get("field_rms", {})) == set(FIELD_ORDER)
+        and all(
+            key in identity
+            for key in ("value", "residual_rms", "joint_energy_rms")
+        )
+        and "value" in vs_pi
+    )
+
+
+def _thresholds_are_current(
+    report: dict[str, Any], cfg: PipelineConfig
+) -> bool:
+    metrics = report.get("metrics", {})
+    identity = metrics.get("identity_relative_residual_rms", {})
+    vs_pi = metrics.get("s_bar_vs_pi_net", {})
+    return _can_reclassify(report) and (
+        identity.get("threshold") == cfg.energy_identity_relative_rms_max
+        and vs_pi.get("threshold") == cfg.s_bar_vs_pi_net_max
+        and _reclassify_report(
+            json.loads(json.dumps(report)), cfg
+        ).get("passed")
+        == report.get("passed")
+        and bool(identity.get("passed"))
+        == bool(
+            identity.get("value") is not None
+            and float(identity["value"])
+            <= cfg.energy_identity_relative_rms_max
+        )
+        and bool(vs_pi.get("passed"))
+        == bool(
+            vs_pi.get("value") is not None
+            and float(vs_pi["value"]) <= cfg.s_bar_vs_pi_net_max
+        )
+    )
+
+
+def sbar_report_is_current(
+    result_dir: Path, root: Any, cfg: PipelineConfig
+) -> bool:
+    report = _load_chained_report(result_dir, root)
+    return report is not None and _thresholds_are_current(report, cfg)
 
 
 def _run_sbar_qa_locked(
@@ -185,7 +319,15 @@ def _run_sbar_qa_locked(
     )
     if root.attrs.get("result_schema_version") != RESULT_SCHEMA_VERSION:
         raise RuntimeError("current full-domain result schema is required")
-    report = compute_sbar_qa(root, cfg, scope="full_domain")
+    stored_report = _load_chained_report(result_dir, root)
+    if (
+        stored_report is not None
+        and _can_reclassify(stored_report)
+        and not _thresholds_are_current(stored_report, cfg)
+    ):
+        report = _reclassify_report(stored_report, cfg)
+    else:
+        report = compute_sbar_qa(root, cfg, scope="full_domain")
     report_hash = write_sbar_artifacts(result_dir, report)
     qa_path = result_dir / "qa.json"
     qa = json.loads(qa_path.read_text(encoding="utf-8"))
@@ -243,6 +385,6 @@ def ensure_sbar_result(
     root = zarr.open_group(
         str(result_dir / result_zarr_name(sigma)), mode="r"
     )
-    if not sbar_report_is_current(result_dir, root):
+    if not sbar_report_is_current(result_dir, root, cfg):
         run_sbar_qa(cfg, time_index, sigma)
     return result_dir

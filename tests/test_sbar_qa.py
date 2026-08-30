@@ -49,8 +49,12 @@ class SBarQATests(unittest.TestCase):
             self.assertTrue(report["passed"])
             self.assertEqual(report["global_totals"]["s_bar"], 0.0)
             self.assertLess(
-                report["metrics"]["identity_residual_rms"]["value"], 1.0e-7
+                report["metrics"]["identity_relative_residual_rms"]["value"],
+                1.0e-7,
             )
+            self.assertEqual(set(report["field_rms"]), {
+                "s_bar", "pi", "work_resolved", "work_full",
+            })
             self.assertNotIn("s_bar_rel_self", report["metrics"])
             self.assertNotIn("global_absolute_totals", report)
             json.dumps(report, allow_nan=False)

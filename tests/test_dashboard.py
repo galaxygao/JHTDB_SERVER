@@ -11,6 +11,7 @@ from jhtdb_pipeline.dashboard import (
     _regime_figure,
     _symmetric_color_limit,
     _symlog_transform,
+    _weak_asymmetry_figure,
     _global_totals_figure,
     complete_result_paths,
     cq_rows,
@@ -19,6 +20,7 @@ from jhtdb_pipeline.dashboard import (
     extract_scalar_slice,
     extract_slice,
     sbar_metric_rows,
+    weak_asymmetry_rows,
     spatial_axis_length,
 )
 
@@ -97,11 +99,26 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(figure.data[0].z.shape, (1024, 1024))
         self.assertIsNone(figure.data[0].customdata)
 
+    def test_weak_asymmetry_figure_and_rows_keep_sign_convention(self) -> None:
+        report = {
+            "global": {"pi_sum": -1.0},
+            "positive_backscatter": {"sum": 9.0, "volume_fraction": 0.4},
+            "negative_forward": {"sum": -10.0, "volume_fraction": 0.6},
+            "zero": {"volume_fraction": 0.0},
+        }
+        figure = _weak_asymmetry_figure(report)
+        self.assertEqual(list(figure.data[0].y), [9.0, -10.0, -1.0])
+        rows = weak_asymmetry_rows(report)
+        self.assertEqual(rows[0]["sign"], "positive/backscatter")
+        self.assertEqual(rows[1]["sign"], "negative/forward")
+
     def test_sbar_metric_rows_expose_thresholds_and_status(self) -> None:
         report = {
             "metrics": {
-                "identity_residual_rms": {
+                "identity_relative_residual_rms": {
                     "value": 2.0e-5,
+                    "residual_rms": 8.0e-5,
+                    "joint_energy_rms": 4.0,
                     "maximum_abs": 3.0e-3,
                     "threshold": 1.0e-4,
                     "passed": True,
@@ -118,7 +135,8 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual([row["状态"] for row in rows], ["通过", "失败"])
         self.assertEqual(rows[1]["值"], "不可定义")
         self.assertEqual(rows[1]["说明"], "denominator is zero")
-        self.assertIn("maximum_abs=", rows[0]["说明"])
+        self.assertIn("residual_rms=", rows[0]["说明"])
+        self.assertIn("joint_energy_rms=", rows[0]["说明"])
 
     def test_energy_identity_residual_uses_documented_signs(self) -> None:
         full = np.array([[7.0, 8.0]])

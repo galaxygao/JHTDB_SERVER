@@ -16,6 +16,11 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from .config import RESULT_SCHEMA_VERSION, PipelineConfig, result_zarr_name
 from .store import spatial_slices
 from .validation import atomic_json
+from .weak_asymmetry import (
+    build_weak_asymmetry_report,
+    ensure_weak_asymmetry_result,
+    write_weak_asymmetry_artifacts,
+)
 
 
 CQ_REPORT_VERSION = 2
@@ -60,6 +65,12 @@ def compute_cq(
     stored_sums = np.zeros(4, dtype=np.float64)
     pi_sum = 0.0
     abs_pi_sum = 0.0
+    pi_sumsq = 0.0
+    positive_sum = 0.0
+    negative_sum = 0.0
+    positive_count = 0
+    negative_count = 0
+    zero_count = 0
     point_count = 0
     console = Console()
     with Progress(
@@ -85,6 +96,16 @@ def compute_cq(
             values64 = values.astype(np.float64)
             pi_sum += float(values64.sum(dtype=np.float64))
             abs_pi_sum += float(np.abs(values64).sum(dtype=np.float64))
+            pi_sumsq += float(np.square(values64).sum(dtype=np.float64))
+            positive = values > 0.0
+            negative = values < 0.0
+            positive_count += int(np.count_nonzero(positive))
+            negative_count += int(np.count_nonzero(negative))
+            zero_count += int(values.size - np.count_nonzero(positive | negative))
+            if np.any(positive):
+                positive_sum += float(values64[positive].sum(dtype=np.float64))
+            if np.any(negative):
+                negative_sum += float(values64[negative].sum(dtype=np.float64))
             point_count += values.size
             full_negative = full < 0.0
             resolved_negative = resolved < 0.0
@@ -135,6 +156,18 @@ def compute_cq(
         }
 
     pi_mean = pi_sum / point_count
+    weak_asymmetry = build_weak_asymmetry_report(
+        point_count=point_count,
+        pi_sum=pi_sum,
+        abs_pi_sum=abs_pi_sum,
+        pi_sumsq=pi_sumsq,
+        positive_sum=positive_sum,
+        negative_sum=negative_sum,
+        positive_count=positive_count,
+        negative_count=negative_count,
+        zero_count=zero_count,
+        closure_relative_max=cfg.cq_partition_relative_max,
+    )
     return {
         "report_version": CQ_REPORT_VERSION,
         "scope": scope,
@@ -174,6 +207,7 @@ def compute_cq(
             "flux_passed": flux_passed,
             "passed": bool(passed),
         },
+        "weak_asymmetry": weak_asymmetry,
         "passed": bool(passed),
     }
 
@@ -253,6 +287,10 @@ def run_cq(
             raise RuntimeError("current full-domain result schema is required")
         report = compute_cq(root, cfg)
         report_hash = write_cq_artifacts(result_dir, report)
+        weak_report = report["weak_asymmetry"]
+        weak_report_hash = write_weak_asymmetry_artifacts(
+            result_dir, weak_report
+        )
 
         qa_path = result_dir / "qa.json"
         qa = json.loads(qa_path.read_text(encoding="utf-8"))
@@ -263,6 +301,14 @@ def run_cq(
             "report_hash": report_hash,
             "partition_check": report["partition_check"],
         }
+        qa["weak_asymmetry"] = {
+            "passed": weak_report["passed"],
+            "scope": weak_report["scope"],
+            "report_version": weak_report["report_version"],
+            "report_hash": weak_report_hash,
+            "asymmetry_index": weak_report["global"]["asymmetry_index"],
+            "closure": weak_report["closure"],
+        }
         atomic_json(qa_path, qa)
 
         manifest_path = result_dir / "manifest.json"
@@ -272,6 +318,9 @@ def run_cq(
                 "cq_passed": report["passed"],
                 "cq_report_version": report["report_version"],
                 "cq_report_hash": report_hash,
+                "weak_asymmetry_passed": weak_report["passed"],
+                "weak_asymmetry_report_version": weak_report["report_version"],
+                "weak_asymmetry_report_hash": weak_report_hash,
             }
         )
         manifest_hash = atomic_json(manifest_path, manifest)
@@ -280,6 +329,9 @@ def run_cq(
                 "cq_passed": report["passed"],
                 "cq_report_version": report["report_version"],
                 "cq_report_hash": report_hash,
+                "weak_asymmetry_passed": weak_report["passed"],
+                "weak_asymmetry_report_version": weak_report["report_version"],
+                "weak_asymmetry_report_hash": weak_report_hash,
                 "manifest_hash": manifest_hash,
             }
         )
@@ -301,4 +353,4 @@ def ensure_cq_result(
     )
     if not cq_report_is_current(result_dir, root):
         run_cq(cfg, time_index, sigma)
-    return result_dir
+    return ensure_weak_asymmetry_result(cfg, time_index, sigma)

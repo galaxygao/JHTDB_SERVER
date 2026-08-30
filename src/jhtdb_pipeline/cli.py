@@ -25,6 +25,7 @@ from .processing import (
 )
 from .sbar_qa import run_sbar_qa
 from .validation import validate_snapshot
+from .weak_asymmetry import run_weak_asymmetry
 
 
 DEFAULT_CONFIG = "configs/pipeline.yaml"
@@ -72,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
         "backfill-full-fields",
         "backfill-full-regime",
         "compute-cq",
+        "compute-weak-asymmetry",
         "qa-sbar",
     ):
         command = commands.add_parser(name)
@@ -110,6 +112,9 @@ def _status(cfg) -> dict[str, object]:
                         "schema_version": manifest.get("schema_version"),
                         "s_bar_qa_passed": manifest.get("s_bar_qa_passed"),
                         "cq_passed": manifest.get("cq_passed"),
+                        "weak_asymmetry_passed": manifest.get(
+                            "weak_asymmetry_passed"
+                        ),
                     }
                 )
             results.append(item)
@@ -223,6 +228,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "compute-cq":
             reports = [
                 run_cq(cfg, args.time_index, sigma)
+                for sigma in _selected_sigmas(cfg, args.sigma_grid)
+            ]
+            print(
+                json.dumps(
+                    reports[0] if len(reports) == 1 else reports,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0 if all(report["passed"] for report in reports) else 2
+        elif args.command == "compute-weak-asymmetry":
+            reports = [
+                run_weak_asymmetry(cfg, args.time_index, sigma)
                 for sigma in _selected_sigmas(cfg, args.sigma_grid)
             ]
             print(

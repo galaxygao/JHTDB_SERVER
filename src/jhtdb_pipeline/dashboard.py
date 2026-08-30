@@ -24,7 +24,7 @@ REGIME_COLORS = [
 GLOBAL_TOTAL_ORDER = ("s_bar", "pi", "work_resolved", "work_full")
 GLOBAL_TOTAL_LABELS = ("ΣS̄", "ΣΠ", "ΣW_res", "ΣW_full")
 SBAR_METRIC_SPECS = (
-    ("identity_residual_rms", "能量等式残差 RMS"),
+    ("identity_relative_residual_rms", "能量等式相对残差 RMS"),
     ("s_bar_vs_pi_net", "|ΣS̄| / |ΣΠ|"),
 )
 CQ_REGIME_ORDER = ("Q1", "Q2", "Q3", "Q4")
@@ -100,8 +100,14 @@ def sbar_metric_rows(report: dict) -> list[dict[str, str]]:
     for key, label in SBAR_METRIC_SPECS:
         metric = metrics.get(key, {})
         detail = metric.get("error") or ""
-        if key == "identity_residual_rms" and metric.get("maximum_abs") is not None:
-            detail = f"maximum_abs={_scientific_text(metric['maximum_abs'])}"
+        if (
+            key == "identity_relative_residual_rms"
+            and metric.get("residual_rms") is not None
+        ):
+            detail = (
+                f"residual_rms={_scientific_text(metric['residual_rms'])}; "
+                f"joint_energy_rms={_scientific_text(metric.get('joint_energy_rms'))}"
+            )
         rows.append(
             {
                 "判据": label,
@@ -159,6 +165,48 @@ def cq_rows(report: dict) -> list[dict[str, str]]:
             }
         )
     return rows
+
+
+def _weak_asymmetry_figure(report: dict):
+    return go.Figure(
+        go.Bar(
+            x=["positive/backscatter", "negative/forward", "net"],
+            y=[
+                report["positive_backscatter"]["sum"],
+                report["negative_forward"]["sum"],
+                report["global"]["pi_sum"],
+            ],
+        )
+    ).update_layout(
+        title="Full-domain positive/negative pi cancellation",
+        yaxis_title="sum(pi)",
+    )
+
+
+def weak_asymmetry_rows(report: dict) -> list[dict[str, str]]:
+    return [
+        {
+            "sign": "positive/backscatter",
+            "sum": _scientific_text(report["positive_backscatter"]["sum"]),
+            "volume_fraction": _scientific_text(
+                report["positive_backscatter"]["volume_fraction"]
+            ),
+        },
+        {
+            "sign": "negative/forward",
+            "sum": _scientific_text(report["negative_forward"]["sum"]),
+            "volume_fraction": _scientific_text(
+                report["negative_forward"]["volume_fraction"]
+            ),
+        },
+        {
+            "sign": "zero",
+            "sum": _scientific_text(0.0),
+            "volume_fraction": _scientific_text(
+                report["zero"]["volume_fraction"]
+            ),
+        },
+    ]
 
 
 def _symmetric_color_limit(values: np.ndarray, percentile: float = 100.0) -> float:
@@ -277,12 +325,13 @@ def main() -> None:
             "Work 与 regime",
             "Π 与 S̄",
             "Cq 分解",
+            "Weak asymmetry",
             "全域 S̄ QA",
         ),
     )
     axis = st.sidebar.selectbox("切片法向", ("z", "y", "x"))
     index = None
-    if page not in ("Cq 分解", "全域 S̄ QA"):
+    if page not in ("Cq 分解", "Weak asymmetry", "全域 S̄ QA"):
         indexed_field = (
             result["work_full"]
             if page in ("Work 与 regime", "Π 与 S̄")
@@ -419,6 +468,41 @@ def main() -> None:
         else:
             st.warning(
                 "当前正式结果没有 cq.json；运行 compute-cq，或重新执行 single-frame 自动补齐。"
+            )
+    elif page == "Weak asymmetry":
+        st.header("全域 Π weak asymmetry")
+        report_path = selected / "weak_asymmetry.json"
+        if report_path.is_file():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            if report.get("passed"):
+                st.success("Π 正负分拆 closure：通过")
+            else:
+                st.error("Π 正负分拆 closure：失败")
+            global_values = report["global"]
+            left, middle, right = st.columns(3)
+            left.metric("mean(pi)", _scientific_text(global_values["pi_mean"]))
+            middle.metric("rms(pi)", _scientific_text(global_values["pi_rms"]))
+            right.metric(
+                "mean(pi)/rms(pi)",
+                _scientific_text(global_values["asymmetry_index"]),
+            )
+            st.caption(
+                "项目符号：pi=tau:S；pi<0 为 forward cascade，pi>0 为 backscatter。"
+            )
+            st.plotly_chart(
+                _weak_asymmetry_figure(report), use_container_width=True
+            )
+            st.dataframe(
+                weak_asymmetry_rows(report),
+                hide_index=True,
+                use_container_width=True,
+            )
+            with st.expander("查看 weak_asymmetry.json 原始报告"):
+                st.json(report)
+        else:
+            st.warning(
+                "当前正式结果没有 weak_asymmetry.json；运行 "
+                "compute-weak-asymmetry，或重新执行 single-frame 自动补齐。"
             )
     else:
         st.header("全域 S̄ QA")

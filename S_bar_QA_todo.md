@@ -1,6 +1,6 @@
 # S̄ 全域 QA — 待办与理由
 
-> 后续变更：schema v5 已把 `regime` 从中心 `512³` 扩展为全周期域 `1024³`。下文关于 schema v4 保持中心 regime 的内容是当时的实施边界；已有 v4 可直接复用 persistent 全域 `work_full/work_resolved` 快速补齐，新计算与 `single-frame` 均永久保存全域 regime。S̄ 的 `|ΣS̄|/Σ|S̄|` 绝对归一化 QA 后续已删除，只保留能量等式和相对净 `Π` 判据。Cq 已改为零阈值符号 Q1–Q4 完备划分，并执行 `C1+...+C4=mean(pi)` closure。
+> 后续变更：schema v5 已把 `regime` 从中心 `512³` 扩展为全周期域 `1024³`。下文关于 schema v4 保持中心 regime 的内容是当时的实施边界；已有 v4 可直接复用 persistent 全域 `work_full/work_resolved` 快速补齐，新计算与 `single-frame` 均永久保存全域 regime。S̄ 的 `|ΣS̄|/Σ|S̄|` 绝对归一化 QA 后续已删除，只保留相对联合 RMS 能量等式和相对净 `Π` 判据。Cq 已改为零阈值符号 Q1–Q4 完备划分，并执行 `C1+...+C4=mean(pi)` closure。
 
 ## 目标
 在**全周期域**上验证 S̄ = ∂ⱼ(ūᵢτᵢⱼ) 的散度归零性质，确认其残余不污染净级串 ⟨Π⟩，并把四个量的全域总量可视化。
@@ -22,7 +22,7 @@ W_full、W_res、Π、S̄ 都保留**全域**（不再 crop 到中心子域）�
 
 | 指标 | 表达式 | 回答 | 通过阈值 |
 |---|---|---|---|
-| 逐点预算残差 | `W_full = W_res − Π + S̄` 的全域 rms | pipeline 逐点是否正确（**数值**） | ~1e-4 以下 |
+| 逐点预算残差 | `W_full = W_res − Π + S̄` 的 residual RMS / 四场联合 RMS | pipeline 逐点是否正确（**数值**） | ~1e-4 以下 |
 | `S_bar_vs_Pi_net` | \|ΣS̄\| / \|ΣΠ\| | S̄ 残余会不会污染净级串（**科学**）★决定性 | << 1（~1e-2 以下） |
 
 判读关键：净 ⟨Π⟩ 本就很小（weak asymmetry），若 ΣS̄ 残余与 ΣΠ 同量级，C_q 分解分辨出的"净贡献"可能混入 S̄ 漏项，因此直接使用净量之比，不再使用容易稀释残差的 Σ\|S̄\| 绝对归一化判据。
@@ -71,7 +71,7 @@ W_full、W_res、Π、S̄ 都保留**全域**（不再 crop 到中心子域）�
 
 新增 `qa-sbar --time-index N [--sigma-grid S]`，只读取当前 complete schema 的四个全域字段，逐 Zarr chunk、用 float64 累加，输出到同一正式结果目录：
 
-- `s_bar_qa.json`：记录字段 hash/manifest hash、点数、四个净和、能量等式 RMS、净量比、阈值、逐项 passed 和总 passed；
+- `s_bar_qa.json`：记录字段 hash/manifest hash、点数、四个净和与平方和/RMS、能量等式相对联合 RMS、绝对诊断残差、净量比、阈值、逐项 passed 和总 passed；
 - `s_bar_global_totals.html`：Plotly 四柱图，柱为 `ΣS̄`、`ΣΠ`、`ΣW_res`、`ΣW_full`，hover 同时显示科学计数法数值；
 - `qa.json`：只写入上述报告的摘要和报告 hash，保留已有 divergence、occupancy 等内容。
 
@@ -80,10 +80,12 @@ W_full、W_res、Π、S̄ 都保留**全域**（不再 crop 到中心子域）�
 ```text
 residual = work_full - (work_resolved - pi + s_bar)
 identity_residual_rms = sqrt(Σ residual² / N)
+joint_energy_rms = sqrt(Σ(work_full² + work_resolved² + pi² + s_bar²) / N)
+identity_relative_residual_rms = identity_residual_rms / joint_energy_rms
 s_bar_vs_pi_net = |Σ s_bar| / |Σ pi|
 ```
 
-默认阈值分别为 `1e-4`、`1e-2`，写入 config 的 validation 段并严格校验。若净 `pi` 分母为零：分子也为零则比值记为 `0`，否则记为 `null`、判定失败并在报告注明原因，JSON 中不写 NaN/Inf。
+pass 使用 `identity_relative_residual_rms` 和 `s_bar_vs_pi_net`，默认阈值分别为 `1e-4`、`1e-2`，写入 config 的 validation 段并严格校验。绝对 residual RMS 和最大绝对值仍保留为诊断量，但不单独决定 pass。报告同时缓存各场平方和/RMS；只改阈值时可直接重新判定并更新 JSON/HTML、QA、manifest 和 attrs，无需重新扫描全域数组。若净 `pi` 分母为零：分子也为零则比值记为 `0`，否则记为 `null`、判定失败并在报告注明原因，JSON 中不写 NaN/Inf。
 
 旧 v3 允许用同一计算器输出 `scope=center_crop` 的诊断预览，但不得命名为全域 QA、不得升级为 v4，也不得让正式 `qa-sbar` 返回成功。
 

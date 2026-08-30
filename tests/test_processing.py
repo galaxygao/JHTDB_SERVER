@@ -13,9 +13,10 @@ import zarr
 
 from jhtdb_pipeline.catalog import Catalog
 from jhtdb_pipeline.config import load_config, result_zarr_name
+from jhtdb_pipeline.cq import ensure_cq_result
 from jhtdb_pipeline.physics import spectral_derivative, spectral_gaussian
 from jhtdb_pipeline.planning import Tile
-from jhtdb_pipeline.sbar_qa import run_sbar_qa
+from jhtdb_pipeline.sbar_qa import ensure_sbar_result, run_sbar_qa
 from jhtdb_pipeline.processing import (
     backfill_full_fields,
     backfill_full_regime,
@@ -95,6 +96,8 @@ class ProcessingTests(unittest.TestCase):
             self.assertTrue((final / "s_bar_global_totals.html").is_file())
             self.assertTrue((final / "cq.json").is_file())
             self.assertTrue((final / "cq.html").is_file())
+            self.assertTrue((final / "weak_asymmetry.json").is_file())
+            self.assertTrue((final / "weak_asymmetry.html").is_file())
             self.assertEqual(run_sbar_qa(cfg, 1)["scope"], "full_domain")
             result = open_complete_result(final)
             self.assertEqual(result["velocity"].shape, (3, 8, 8, 8))
@@ -161,10 +164,12 @@ class ProcessingTests(unittest.TestCase):
             manifest = json.loads((final / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["schema_version"], 5)
             self.assertEqual(manifest["field_scopes"]["regime"], "full_domain")
-            self.assertEqual(manifest["s_bar_qa_report_version"], 2)
+            self.assertEqual(manifest["s_bar_qa_report_version"], 3)
             self.assertIn("s_bar_qa_report_hash", manifest)
             self.assertTrue(manifest["cq_passed"])
             self.assertIn("cq_report_hash", manifest)
+            self.assertTrue(manifest["weak_asymmetry_passed"])
+            self.assertIn("weak_asymmetry_report_hash", manifest)
             self.assertEqual(
                 json.loads((final / "COMPLETE").read_text(encoding="utf-8"))[
                     "manifest_hash"
@@ -175,11 +180,38 @@ class ProcessingTests(unittest.TestCase):
                 "velocity", "gradient", "velocity_bar", "gradient_bar",
                 "work_full", "work_resolved", "pi", "s_bar", "regime",
             })
+            relaxed_cfg = replace(
+                cfg, energy_identity_relative_rms_max=5.0e-4
+            )
+            with patch(
+                "jhtdb_pipeline.sbar_qa.compute_sbar_qa",
+                side_effect=AssertionError("full-field scan was not expected"),
+            ):
+                self.assertEqual(ensure_sbar_result(relaxed_cfg, 1), final)
+            threshold_only_report = json.loads(
+                (final / "s_bar_qa.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                threshold_only_report["metrics"]
+                ["identity_relative_residual_rms"]["threshold"],
+                5.0e-4,
+            )
+            (final / "weak_asymmetry.json").unlink()
+            (final / "weak_asymmetry.html").unlink()
+            with patch(
+                "jhtdb_pipeline.cq.compute_cq",
+                side_effect=AssertionError("Cq scan was not expected"),
+            ):
+                self.assertEqual(ensure_cq_result(relaxed_cfg, 1), final)
+            self.assertTrue((final / "weak_asymmetry.json").is_file())
+            self.assertTrue((final / "weak_asymmetry.html").is_file())
             for name in (
                 "s_bar_qa.json",
                 "s_bar_global_totals.html",
                 "cq.json",
                 "cq.html",
+                "weak_asymmetry.json",
+                "weak_asymmetry.html",
             ):
                 (final / name).unlink()
             shutil.rmtree(cfg.raw_store_path(1))
@@ -187,11 +219,13 @@ class ProcessingTests(unittest.TestCase):
             refreshed_s_bar = json.loads(
                 (final / "s_bar_qa.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(refreshed_s_bar["report_version"], 2)
+            self.assertEqual(refreshed_s_bar["report_version"], 3)
             self.assertNotIn("s_bar_rel_self", refreshed_s_bar["metrics"])
             self.assertTrue((final / "s_bar_global_totals.html").is_file())
             self.assertTrue((final / "cq.json").is_file())
             self.assertTrue((final / "cq.html").is_file())
+            self.assertTrue((final / "weak_asymmetry.json").is_file())
+            self.assertTrue((final / "weak_asymmetry.html").is_file())
 
     def test_legacy_complete_result_is_replaced_only_after_new_staging(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -312,12 +346,21 @@ class ProcessingTests(unittest.TestCase):
             manifest["schema_version"] = 4
             manifest["field_scopes"]["regime"] = "center_crop"
             manifest["fields"]["regime"]["shape"] = list(cfg.result_shape_zyx)
-            for key in ("cq_passed", "cq_report_version", "cq_report_hash"):
+            for key in (
+                "cq_passed",
+                "cq_report_version",
+                "cq_report_hash",
+                "weak_asymmetry_passed",
+                "weak_asymmetry_report_version",
+                "weak_asymmetry_report_hash",
+            ):
                 manifest.pop(key, None)
                 root.attrs.pop(key, None)
             atomic_json(manifest_path, manifest)
             (final / "cq.json").unlink()
             (final / "cq.html").unlink()
+            (final / "weak_asymmetry.json").unlink()
+            (final / "weak_asymmetry.html").unlink()
             shutil.rmtree(cfg.raw_store_path(1))
 
             upgraded = backfill_full_regime(cfg, 1)
@@ -336,6 +379,8 @@ class ProcessingTests(unittest.TestCase):
             )
             self.assertTrue((final / "cq.json").is_file())
             self.assertTrue((final / "cq.html").is_file())
+            self.assertTrue((final / "weak_asymmetry.json").is_file())
+            self.assertTrue((final / "weak_asymmetry.html").is_file())
             self.assertFalse(any(final.glob(".*regime-v4-backup*")))
 
     def test_backfill_never_fetches_when_temporary_raw_cache_is_missing(self) -> None:

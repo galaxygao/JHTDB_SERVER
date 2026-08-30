@@ -29,6 +29,7 @@ SciServer 的系统结构、容器、Compute Job 和存储卷说明见 [`SCISERV
 - 全域无散度检查、shape/dtype/有限值检查和逐字段 SHA-256；
 - 可重复运行的全域 S̄ QA、两项判据和四场净总量柱状图；
 - 全域 Q1–Q4 的 Cq 分解、stored/LES 双符号报告及四项 closure 自检；
+- 全域 Π 正负分拆、净通量/RMS 弱非对称指标及 closure 自检；
 - staging 到正式结果的原子提交和 `COMPLETE` 标记；
 - Streamlit + Plotly 只读服务器 GUI，按需读取二维切片。
 
@@ -92,7 +93,7 @@ s_bar  = Σ_j ∂_j(Σ_i ū_i tau_ij)
 work_full = work_resolved - pi + s_bar
 ```
 
-这里的 `pi` 严格采用式 (2) 的符号约定。常见 LES 文献定义的正向能量通量 `Pi_conventional = -tau_ij S_ij`，在不可压缩且应力对称时等于这里的 `-pi`。QA 会记录上述 work 分解的逐点残差 RMS 和最大绝对值。
+这里的 `pi` 严格采用式 (2) 的符号约定。常见 LES 文献定义的正向能量通量 `Pi_conventional = -tau_ij S_ij`，在不可压缩且应力对称时等于这里的 `-pi`。QA 用四场联合 RMS 归一化逐点能量等式残差；绝对 residual RMS 和最大绝对值仍写入报告，只作诊断、不参与 pass。
 
 `regime` 在全周期域根据两种 work 相对于各自全域 RMS 阈值的正负组合编码为 uncertain、Q1、Q2、Q3、Q4。
 
@@ -105,6 +106,15 @@ C1 + C2 + C3 + C4 = mean(pi)
 ```
 
 零值归入非负侧，因此 Q1–Q4 覆盖每个全域点并可做严格四项 closure。用于可视化的 thresholded `regime` 仍可包含 uncertain，但不参与 Cq 划分。`pi=tau:S` 是项目存储符号；常见 LES 正向通量为 `Pi_LES=-tau:S=-pi`。报告同时保存每个区域的点数、体积分数、`pi` 总和、对全域均值的贡献和条件均值。
+
+全域 weak asymmetry 报告把 `pi > 0` 解释为 backscatter、`pi < 0` 解释为 forward cascade，并计算：
+
+```text
+Pi_pos_sum + Pi_neg_sum = Pi_sum
+asymmetry_index = mean(pi) / rms(pi)
+```
+
+`asymmetry_index` 直接比较净通量和 Π 涨落强度；其绝对值越小，正负强 patch 抵消越显著。Cq 与 weak asymmetry 共用一次全域 chunk 扫描，避免重复读取 `pi`。
 
 ## 2. 配置、安装与使用
 
@@ -167,7 +177,7 @@ token：
 | storage | `compression_threads` | 8 个压缩线程 |
 | storage | safety reserve | persistent 15 GiB、scratch 16 GiB |
 | validation | divergence thresholds | 原始和滤波速度各自的相对 RMS `1e-4`、相对最大值 `1e-3` |
-| validation | S̄ QA thresholds | 能量等式 RMS `1e-4`、`S_bar_vs_Pi_net` `1e-2`；不计算 `Σ|S̄|` 绝对归一化判据 |
+| validation | S̄ QA thresholds | 能量等式相对联合 RMS `1e-4`、`S_bar_vs_Pi_net` `1e-2`；不计算 `Σ|S̄|` 绝对归一化判据 |
 | validation | `cq_partition_relative_max` | C1–C4 closure 相对 `Σ|pi|` 的残差上限，默认 `1e-12` |
 | physics | `sigma_grid` | 高斯标准差列表；默认生产配置为 `[1.0,2.0,3.0]` 个网格间距 |
 | physics | `crop_start`, `crop_shape` | `[256,256,256]`, `[512,512,512]` |
@@ -365,6 +375,9 @@ python -m jhtdb_pipeline qa-sbar --time-index 1 --sigma-grid 1.0 --config config
 # 只读完整结果的全域 pi/work 字段，计算或重算四项 Cq closure
 python -m jhtdb_pipeline compute-cq --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
 
+# 只读完整结果的全域 pi，单独计算或重算 weak asymmetry
+python -m jhtdb_pipeline compute-weak-asymmetry --time-index 1 --sigma-grid 1.0 --config configs/pipeline.yaml
+
 # 查看输入和正式结果状态
 python -m jhtdb_pipeline status --config configs/pipeline.yaml
 ```
@@ -384,9 +397,10 @@ CLI 命令汇总：
 | `backfill-full-fields` | 否 | 复用 temporary 数据，把已有 v2/v3 结果补算成当前全域 schema |
 | `backfill-full-regime` | 否 | 只读 v4 persistent 全域 work 字段，快速补齐全域 regime |
 | `qa-sbar` | 否 | 读取当前全域四场，重算两项 S̄ QA 与净总量柱状图 |
-| `compute-cq` | 否 | 逐 chunk 读取全域 pi/work，计算 Q1–Q4 的 stored/LES Cq 和四项 closure |
+| `compute-cq` | 否 | 逐 chunk 读取全域 pi/work，计算 Q1–Q4 Cq，并在同一次扫描生成 weak asymmetry 报告 |
+| `compute-weak-asymmetry` | 否 | 只读全域 pi，计算正负总量/占比、净通量/RMS 指标和 closure |
 | `upgrade-result` | 否 | 自动选择 v4 regime 快速补齐或 v2/v3 全场补算 |
-| `single-frame` | 按需 | 已有 v4/v5 不访问 JHTDB，并自动补齐新版 S̄/Cq 报告；缺少完整结果时串联单帧流程 |
+| `single-frame` | 按需 | 已有 v4/v5 不访问 JHTDB，并自动补齐新版 S̄/Cq/weak-asymmetry 报告；缺少完整结果时串联单帧流程 |
 | `status` | 否 | 输入缓存和正式结果状态 |
 | `gui` | 否 | 启动只读服务器 GUI |
 
@@ -411,6 +425,7 @@ GUI 监听 `0.0.0.0:8501`，支持：
 - 式 (2) 的 `pi`、`s_bar` 同色标切片，以及当前切片的能量等式残差；
 - 独立的“全域 S̄ QA”页面：两项判据、阈值、通过状态、四场净总量柱状图和原始报告；
 - 独立的“Cq 分解”页面：Q1–Q4 占比、贡献、条件均值、双符号柱状图和四项 closure；
+- 独立的“Weak asymmetry”页面：Π 正负总量/占比、净通量、RMS、非对称指标和 closure；
 - manifest、输入/散度 QA 和 `COMPLETE` 完整性记录；
 - `x/y/z` 法向与切片 index 选择。
 
@@ -445,7 +460,8 @@ JHU_DATA/
 │   ├── processing.py
 │   ├── sbar_qa.py
 │   ├── store.py
-│   └── validation.py
+│   ├── validation.py
+│   └── weak_asymmetry.py
 ├── tests/
 │   ├── test_auth.py
 │   ├── test_catalog_store.py
@@ -457,7 +473,8 @@ JHU_DATA/
 │   ├── test_physics.py
 │   ├── test_planning.py
 │   ├── test_processing.py
-│   └── test_sbar_qa.py
+│   ├── test_sbar_qa.py
+│   └── test_weak_asymmetry.py
 ├── dashboard.py
 ├── pyproject.toml
 ├── README.md
@@ -494,6 +511,7 @@ JHU_DATA/
 | `processing.py` | 完整域滤波/梯度/四场计算、中心字段裁剪、复用/backfill、staging 和正式结果提交 |
 | `sbar_qa.py` | 流式读取全域四场，计算 S̄ 两项 QA，并写 JSON 与 Plotly 柱状图 |
 | `cq.py` | 流式读取全域 pi/work，计算 Q1–Q4 Cq、LES 符号结果和四项 closure |
+| `weak_asymmetry.py` | 流式分拆全域 Π 正负总量/占比，计算净通量/RMS 指标、closure 和报告产物 |
 | `store.py` | Zarr schema、Blosc/Zstd 压缩、tile 回读 checksum、结果字段哈希和只读打开规则 |
 | `validation.py` | 输入覆盖/重叠/有限值/接缝验证、manifest hash 和原子 JSON 写入 |
 
@@ -514,6 +532,7 @@ JHU_DATA/
 | `test_processing.py` | 小型端到端全域四场、temporary 复用、正式提交和散度失败门槛 |
 | `test_sbar_qa.py` | 两项 S̄ 判据、全域净和、零分母 JSON 安全和图表产物 |
 | `test_cq.py` | Q1–Q4 完整分区、stored/LES 符号、空区域 JSON 安全和四项 closure |
+| `test_weak_asymmetry.py` | Π 正负/零分拆、净通量/RMS 非对称指标、closure 和 JSON/HTML 产物 |
 
 ### 3.5 文档与平台资料
 
@@ -562,11 +581,11 @@ python -m unittest discover -s tests -v
 - 中心 raw/filtered 字段使用完全相同的空间坐标；
 - 原始速度和滤波速度各自的全域相对无散度 RMS 不超过 `1e-4`；
 - 原始速度和滤波速度各自的全域相对最大散度不超过 `1e-3`；
-- 全域能量等式残差 RMS 不超过 `1e-4`；
+- 全域能量等式残差相对四场联合 RMS 不超过 `1e-4`；
 - `|ΣS̄|/|ΣΠ|` 不超过 `1e-2`；不使用 `Σ|S̄|` 绝对归一化判据；
 - regime 阈值和 occupancy 写入 QA。
 
-`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套全域统计。`s_bar_qa.json` 记录四个全域净和、能量等式残差以及 `|ΣS̄|/|ΣΠ|`；不再计算 `Σ|S̄|` 绝对归一化 QA。`s_bar_global_totals.html` 是可离线打开的四柱图。`cq.json` 和 `cq.html` 记录 Q1–Q4 的 stored/LES 贡献、条件均值、占比和四项 closure。`qa-sbar` 与 `compute-cq` 只接受当前全域结果 schema。`process-center` 在任一速度场散度验证失败时保留失败 staging，不创建 `COMPLETE`；QA 失败会保留全域数据供诊断，并在 attrs/QA 中明确标记失败。
+`divergence.json` 和 `qa.json` 的 `divergence` 对象分别在 `unfiltered` 与 `filtered` 中记录两套全域统计。`s_bar_qa.json` 记录四个全域净和、各场平方和/RMS、相对能量等式残差、绝对诊断残差以及 `|ΣS̄|/|ΣΠ|`；不再计算 `Σ|S̄|` 绝对归一化 QA。只调整两个 S̄ 阈值时，程序会用报告中的缓存统计直接刷新 pass 和 metadata，不重扫四个全域数组。`s_bar_global_totals.html` 是可离线打开的四柱图。`cq.json` 和 `cq.html` 记录 Q1–Q4 的 stored/LES 贡献、条件均值、占比和四项 closure；`weak_asymmetry.json` 和 `weak_asymmetry.html` 记录全域 Π 正负分拆及净通量/RMS 指标。新计算在 Cq 扫描中同步累加 weak asymmetry；已有有效 Cq 报告但缺 weak 报告时只读取 `pi`，不会重扫两个 work 场。`qa-sbar`、`compute-cq` 与 `compute-weak-asymmetry` 只接受当前全域结果 schema。`process-center` 在任一速度场散度验证失败时保留失败 staging，不创建 `COMPLETE`；QA 失败会保留全域数据供诊断，并在 attrs/QA 中明确标记失败。
 
 ### 4.4 输出 Review 与提交规则
 
@@ -578,6 +597,7 @@ python -m unittest discover -s tests -v
 - `manifest.json`、`qa.json` 和 `divergence.json` 一致性记录；
 - `s_bar_qa.json` 与 `s_bar_global_totals.html`；
 - `cq.json` 与 `cq.html`；
+- `weak_asymmetry.json` 与 `weak_asymmetry.html`；
 - staging 到正式目录的同文件系统原子 rename；
 - 最后创建包含 manifest hash 的 `COMPLETE`。
 
@@ -656,6 +676,8 @@ results/t000001_sigma_1/
 ├── s_bar_global_totals.html
 ├── cq.json
 ├── cq.html
+├── weak_asymmetry.json
+├── weak_asymmetry.html
 └── COMPLETE
 ```
 
@@ -688,6 +710,7 @@ results/t000001_sigma_1/
 | v4 需要全域 regime | 运行 `backfill-full-regime`；只读 persistent 全域 work 字段，不需要 temporary 或 FFT |
 | `qa-sbar` 失败 | 保留全域数据和报告，检查 `s_bar_qa.json`，命令返回非零 |
 | `compute-cq` 失败 | 保留正式字段，检查四项 closure、全域 work/pi 有限值和 `cq.json`，命令返回非零 |
+| `compute-weak-asymmetry` 失败 | 保留正式字段，检查正负 Π closure、全域 pi 有限值和 `weak_asymmetry.json`，命令返回非零 |
 | 散度失败 | staging 保留诊断数据，不创建 `COMPLETE` |
 | `finalize-result` 前失败 | GUI 不显示 staging |
 | persistent 空间不足 | 停止新任务并核对 Quotas，不覆盖或静默删除正式结果 |

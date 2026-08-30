@@ -29,6 +29,7 @@ class CliBatchTests(unittest.TestCase):
             "backfill-full-fields",
             "backfill-full-regime",
             "compute-cq",
+            "compute-weak-asymmetry",
             "qa-sbar",
         ):
             args = build_parser().parse_args(

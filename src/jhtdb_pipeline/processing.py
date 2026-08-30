@@ -28,6 +28,7 @@ from .physics import (
 from .store import create_result_group, hash_zarr_array
 from .sbar_qa import compute_sbar_qa, ensure_sbar_result, write_sbar_artifacts
 from .validation import atomic_json, input_manifest_hash
+from .weak_asymmetry import write_weak_asymmetry_artifacts
 
 
 RESULT_FIELDS = {
@@ -851,11 +852,13 @@ def process_center(
     s_bar_report = compute_sbar_qa(result, cfg, scope="full_domain")
     s_bar_report_hash = write_sbar_artifacts(staging, s_bar_report)
     overlap_report = _validate_previous_center_overlap(cfg, sigma, final, result)
-    identity_metric = s_bar_report["metrics"]["identity_residual_rms"]
+    identity_metric = s_bar_report["metrics"]["identity_relative_residual_rms"]
     decomposition_report = {
         "identity": "work_full = work_resolved - pi + s_bar",
         "scope": "full_domain",
-        "residual_rms": identity_metric["value"],
+        "relative_residual_rms": identity_metric["value"],
+        "absolute_residual_rms": identity_metric["residual_rms"],
+        "joint_energy_rms": identity_metric["joint_energy_rms"],
         "residual_maximum_abs": identity_metric["maximum_abs"],
     }
 
@@ -864,6 +867,8 @@ def process_center(
     )
     cq_report = compute_cq(result, cfg)
     cq_report_hash = write_cq_artifacts(staging, cq_report)
+    weak_report = cq_report["weak_asymmetry"]
+    weak_report_hash = write_weak_asymmetry_artifacts(staging, weak_report)
 
     qa = {
         "dataset": cfg.dataset,
@@ -896,6 +901,14 @@ def process_center(
             "report_hash": cq_report_hash,
             "partition_check": cq_report["partition_check"],
         },
+        "weak_asymmetry": {
+            "passed": weak_report["passed"],
+            "scope": weak_report["scope"],
+            "report_version": weak_report["report_version"],
+            "report_hash": weak_report_hash,
+            "asymmetry_index": weak_report["global"]["asymmetry_index"],
+            "closure": weak_report["closure"],
+        },
     }
     atomic_json(staging / "qa.json", qa)
     result.attrs.update(
@@ -908,6 +921,9 @@ def process_center(
             "cq_passed": cq_report["passed"],
             "cq_report_version": cq_report["report_version"],
             "cq_report_hash": cq_report_hash,
+            "weak_asymmetry_passed": weak_report["passed"],
+            "weak_asymmetry_report_version": weak_report["report_version"],
+            "weak_asymmetry_report_hash": weak_report_hash,
             "decomposition": decomposition_report,
             "s_bar_qa_passed": s_bar_report["passed"],
             "s_bar_qa_report_version": s_bar_report["report_version"],
@@ -985,6 +1001,15 @@ def finalize_result(
         "cq_passed": bool(root.attrs.get("cq_passed", False)),
         "cq_report_version": root.attrs.get("cq_report_version"),
         "cq_report_hash": root.attrs.get("cq_report_hash"),
+        "weak_asymmetry_passed": bool(
+            root.attrs.get("weak_asymmetry_passed", False)
+        ),
+        "weak_asymmetry_report_version": root.attrs.get(
+            "weak_asymmetry_report_version"
+        ),
+        "weak_asymmetry_report_hash": root.attrs.get(
+            "weak_asymmetry_report_hash"
+        ),
         "fields": fields,
     }
     manifest_hash = atomic_json(staging / "manifest.json", manifest)
