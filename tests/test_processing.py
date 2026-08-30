@@ -71,7 +71,12 @@ class ProcessingTests(unittest.TestCase):
     def test_center_pipeline_and_persistent_finalization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cfg, velocity = fixture(Path(temporary))
-            plan = resource_plan(cfg)
+            batch_cfg = replace(
+                cfg,
+                sigma_grid=1.0,
+                sigma_grids=(1.0, 2.0, 3.0),
+            )
+            plan = resource_plan(batch_cfg)
             expected_result_bytes = 8**3 * 96 + 16**3 * 17
             self.assertEqual(
                 plan["persistent_result_GiB"], expected_result_bytes / 1024**3
@@ -196,15 +201,53 @@ class ProcessingTests(unittest.TestCase):
                 ["identity_relative_residual_rms"]["threshold"],
                 5.0e-4,
             )
-            (final / "weak_asymmetry.json").unlink()
-            (final / "weak_asymmetry.html").unlink()
+            weak_path = final / "weak_asymmetry.json"
+            v1_report = json.loads(weak_path.read_text(encoding="utf-8"))
+            v1_report["report_version"] = 1
+            for key in (
+                "abs_pi_p99",
+                "abs_pi_max",
+                "ratio_p99",
+                "ratio_p99_definition",
+                "ratio_p99_error",
+                "ratio_max",
+                "ratio_max_definition",
+                "ratio_max_error",
+            ):
+                v1_report["global"].pop(key, None)
+            v1_hash = atomic_json(weak_path, v1_report)
+            manifest_path = final / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.update(
+                {
+                    "weak_asymmetry_report_version": 1,
+                    "weak_asymmetry_report_hash": v1_hash,
+                }
+            )
+            manifest_hash = atomic_json(manifest_path, manifest)
+            metadata_root = zarr.open_group(
+                str(final / result_zarr_name(cfg.sigma_grid)), mode="a"
+            )
+            metadata_root.attrs.update(
+                {
+                    "weak_asymmetry_report_version": 1,
+                    "weak_asymmetry_report_hash": v1_hash,
+                    "manifest_hash": manifest_hash,
+                }
+            )
+            atomic_json(final / "COMPLETE", {"manifest_hash": manifest_hash})
             with patch(
                 "jhtdb_pipeline.cq.compute_cq",
                 side_effect=AssertionError("Cq scan was not expected"),
+            ), patch(
+                "jhtdb_pipeline.weak_asymmetry.compute_weak_asymmetry",
+                side_effect=AssertionError("old weak metrics must be reused"),
             ):
                 self.assertEqual(ensure_cq_result(relaxed_cfg, 1), final)
-            self.assertTrue((final / "weak_asymmetry.json").is_file())
-            self.assertTrue((final / "weak_asymmetry.html").is_file())
+            upgraded_weak = json.loads(weak_path.read_text(encoding="utf-8"))
+            self.assertEqual(upgraded_weak["report_version"], 2)
+            self.assertIn("ratio_p99", upgraded_weak["global"])
+            self.assertIn("ratio_max", upgraded_weak["global"])
             for name in (
                 "s_bar_qa.json",
                 "s_bar_global_totals.html",

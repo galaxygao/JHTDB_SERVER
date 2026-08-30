@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from jhtdb_pipeline.config import load_config
 from jhtdb_pipeline.planning import plan, requests_for, tiles_for, tiles_in_request
@@ -20,7 +21,12 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(tiles[-1].api_ranges, ((897, 1024), (897, 1024), (897, 1024)))
 
     def test_plan_is_single_time_and_serial(self):
-        result = plan(self.cfg, 3)
+        batch_cfg = replace(
+            self.cfg,
+            sigma_grid=1.0,
+            sigma_grids=(1.0, 2.0, 3.0),
+        )
+        result = plan(batch_cfg, 3)
         self.assertEqual(result["time_index"], 3)
         self.assertEqual(result["physical_time"], 0.004)
         self.assertTrue(result["strictly_serial"])
@@ -47,7 +53,12 @@ class PlanningTests(unittest.TestCase):
         )
 
     def test_full_domain_energy_fields_are_in_persistent_capacity_plan(self):
-        resources = resource_plan(self.cfg)
+        batch_cfg = replace(
+            self.cfg,
+            sigma_grid=1.0,
+            sigma_grids=(1.0, 2.0, 3.0),
+        )
+        resources = resource_plan(batch_cfg)
         self.assertEqual(resources["persistent_result_GiB"], 29.0)
         self.assertEqual(resources["persistent_batch_GiB"], 87.0)
         self.assertEqual(resources["persistent_v3_to_v5_peak_GiB"], 43.125)

@@ -907,6 +907,8 @@ def process_center(
             "report_version": weak_report["report_version"],
             "report_hash": weak_report_hash,
             "asymmetry_index": weak_report["global"]["asymmetry_index"],
+            "ratio_p99": weak_report["global"]["ratio_p99"],
+            "ratio_max": weak_report["global"]["ratio_max"],
             "closure": weak_report["closure"],
         },
     }

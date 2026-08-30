@@ -358,7 +358,7 @@ python -m jhtdb_pipeline status --config configs/pipeline.yaml
 | `backfill-full-regime --time-index N --sigma-grid S` | 从 v4 persistent 全域 work 字段快速补齐全域 regime；不做 FFT |
 | `qa-sbar --time-index N --sigma-grid S` | 从当前全域四场重算 S̄ 两项 QA 和柱状图 |
 | `compute-cq --time-index N --sigma-grid S` | 从全域 pi/work 计算 Q1–Q4 Cq、LES 符号贡献和四项 closure |
-| `compute-weak-asymmetry --time-index N --sigma-grid S` | 只读全域 pi，计算正负分拆、净通量/RMS 指标和 closure |
+| `compute-weak-asymmetry --time-index N --sigma-grid S` | 只读全域 pi 一次，计算正负分拆、净通量/RMS、p99/max 比值和 closure |
 | `upgrade-result --time-index N [--sigma-grid S]` | 自动选择 v4 regime 快速补齐或 v2/v3 temporary 补算 |
 | `single-frame --time-index N [--sigma-grid S]` | 串联完整流程；默认批量处理配置列表，指定参数时只跑一个尺度 |
 | `status` | 列出输入和正式/非正式结果状态 |

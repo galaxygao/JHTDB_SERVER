@@ -486,6 +486,15 @@ def main() -> None:
                 "mean(pi)/rms(pi)",
                 _scientific_text(global_values["asymmetry_index"]),
             )
+            p99_column, max_column = st.columns(2)
+            p99_column.metric(
+                "|mean(pi)| / p99(|pi|)",
+                _scientific_text(global_values.get("ratio_p99")),
+            )
+            max_column.metric(
+                "|mean(pi)| / max(|pi|)",
+                _scientific_text(global_values.get("ratio_max")),
+            )
             st.caption(
                 "项目符号：pi=tau:S；pi<0 为 forward cascade，pi>0 为 backscatter。"
             )

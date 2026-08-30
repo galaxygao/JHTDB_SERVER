@@ -54,6 +54,18 @@ class CqTests(unittest.TestCase):
                 report["weak_asymmetry"]["positive_backscatter"]["sum"],
                 19.0,
             )
+            self.assertAlmostEqual(
+                report["weak_asymmetry"]["global"]["ratio_p99"],
+                abs(report["global"]["stored_pi_mean"])
+                / float(
+                    np.percentile(np.abs(pi).astype(np.float64), 99)
+                ),
+            )
+            self.assertAlmostEqual(
+                report["weak_asymmetry"]["global"]["ratio_max"],
+                abs(report["global"]["stored_pi_mean"])
+                / float(np.max(np.abs(pi))),
+            )
             for item in report["regimes"].values():
                 self.assertEqual(item["les_forward_cq"], -item["stored_cq"])
             self.assertLessEqual(

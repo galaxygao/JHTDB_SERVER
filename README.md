@@ -112,9 +112,11 @@ C1 + C2 + C3 + C4 = mean(pi)
 ```text
 Pi_pos_sum + Pi_neg_sum = Pi_sum
 asymmetry_index = mean(pi) / rms(pi)
+ratio_p99 = abs(mean(pi)) / percentile(abs(pi), 99)
+ratio_max = abs(mean(pi)) / max(abs(pi))
 ```
 
-`asymmetry_index` 直接比较净通量和 Π 涨落强度；其绝对值越小，正负强 patch 抵消越显著。Cq 与 weak asymmetry 共用一次全域 chunk 扫描，避免重复读取 `pi`。
+`asymmetry_index` 直接比较净通量和 Π 涨落强度；其绝对值越小，正负强 patch 抵消越显著。`ratio_p99` 和 `ratio_max` 使用净通量绝对值，分别以 `|Π|` 的 99 百分位和最大值归一化。p99 按线性分位数定义用 float64 插值精确计算，流式保留最高约 1% 候选，不需要第二次读取 `pi`。Cq 与 weak asymmetry 共用一次全域 chunk 扫描，避免重复读取数据。
 
 ## 2. 配置、安装与使用
 
@@ -425,7 +427,7 @@ GUI 监听 `0.0.0.0:8501`，支持：
 - 式 (2) 的 `pi`、`s_bar` 同色标切片，以及当前切片的能量等式残差；
 - 独立的“全域 S̄ QA”页面：两项判据、阈值、通过状态、四场净总量柱状图和原始报告；
 - 独立的“Cq 分解”页面：Q1–Q4 占比、贡献、条件均值、双符号柱状图和四项 closure；
-- 独立的“Weak asymmetry”页面：Π 正负总量/占比、净通量、RMS、非对称指标和 closure；
+- 独立的“Weak asymmetry”页面：Π 正负总量/占比、净通量、RMS、`ratio_p99`、`ratio_max`、非对称指标和 closure；
 - manifest、输入/散度 QA 和 `COMPLETE` 完整性记录；
 - `x/y/z` 法向与切片 index 选择。
 

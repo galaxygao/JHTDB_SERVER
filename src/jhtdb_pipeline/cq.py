@@ -17,6 +17,7 @@ from .config import RESULT_SCHEMA_VERSION, PipelineConfig, result_zarr_name
 from .store import spatial_slices
 from .validation import atomic_json
 from .weak_asymmetry import (
+    AbsPiPercentileAccumulator,
     build_weak_asymmetry_report,
     ensure_weak_asymmetry_result,
     write_weak_asymmetry_artifacts,
@@ -72,6 +73,8 @@ def compute_cq(
     negative_count = 0
     zero_count = 0
     point_count = 0
+    expected_count = int(np.prod(expected, dtype=np.int64))
+    tail = AbsPiPercentileAccumulator(expected_count)
     console = Console()
     with Progress(
         SpinnerColumn("line"),
@@ -94,9 +97,11 @@ def compute_cq(
             ):
                 raise ValueError("pi or work fields contain NaN or Inf")
             values64 = values.astype(np.float64)
+            absolute_values = np.abs(values)
             pi_sum += float(values64.sum(dtype=np.float64))
-            abs_pi_sum += float(np.abs(values64).sum(dtype=np.float64))
+            abs_pi_sum += float(absolute_values.sum(dtype=np.float64))
             pi_sumsq += float(np.square(values64).sum(dtype=np.float64))
+            tail.add(absolute_values)
             positive = values > 0.0
             negative = values < 0.0
             positive_count += int(np.count_nonzero(positive))
@@ -122,8 +127,9 @@ def compute_cq(
                     stored_sums[index] += float(values64[mask].sum(dtype=np.float64))
             progress.advance(task)
 
-    if point_count != int(np.prod(expected, dtype=np.int64)):
+    if point_count != expected_count:
         raise RuntimeError("C_q point coverage is incomplete")
+    abs_pi_p99, abs_pi_max = tail.result()
     partition_sum = float(stored_sums.sum(dtype=np.float64))
     residual_sum = partition_sum - pi_sum
     if abs_pi_sum == 0.0:
@@ -161,6 +167,8 @@ def compute_cq(
         pi_sum=pi_sum,
         abs_pi_sum=abs_pi_sum,
         pi_sumsq=pi_sumsq,
+        abs_pi_p99=abs_pi_p99,
+        abs_pi_max=abs_pi_max,
         positive_sum=positive_sum,
         negative_sum=negative_sum,
         positive_count=positive_count,
@@ -307,6 +315,8 @@ def run_cq(
             "report_version": weak_report["report_version"],
             "report_hash": weak_report_hash,
             "asymmetry_index": weak_report["global"]["asymmetry_index"],
+            "ratio_p99": weak_report["global"]["ratio_p99"],
+            "ratio_max": weak_report["global"]["ratio_max"],
             "closure": weak_report["closure"],
         }
         atomic_json(qa_path, qa)

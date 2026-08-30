@@ -11,6 +11,7 @@ import zarr
 
 from jhtdb_pipeline.config import load_config
 from jhtdb_pipeline.weak_asymmetry import (
+    AbsPiPercentileAccumulator,
     compute_weak_asymmetry,
     write_weak_asymmetry_artifacts,
 )
@@ -48,7 +49,44 @@ class WeakAsymmetryTests(unittest.TestCase):
                 report["global"]["pi_rms"],
                 float(np.sqrt(np.mean(pi.astype(np.float64) ** 2))),
             )
+            expected_p99 = float(
+                np.percentile(np.abs(pi).astype(np.float64), 99)
+            )
+            self.assertAlmostEqual(report["global"]["abs_pi_p99"], expected_p99)
+            self.assertEqual(report["global"]["abs_pi_max"], 8.0)
+            self.assertAlmostEqual(
+                report["global"]["ratio_p99"],
+                abs(float(np.mean(pi, dtype=np.float64))) / expected_p99,
+            )
+            self.assertAlmostEqual(
+                report["global"]["ratio_max"],
+                abs(float(np.mean(pi, dtype=np.float64))) / 8.0,
+            )
             self.assertEqual(report["closure"]["residual_sum"], 0.0)
+
+    def test_streaming_p99_is_exact_across_many_chunks(self) -> None:
+        values = np.abs(
+            np.random.default_rng(42).normal(size=10_003).astype(np.float32)
+        )
+        accumulator = AbsPiPercentileAccumulator(values.size)
+        for start in range(0, values.size, 137):
+            accumulator.add(values[start : start + 137])
+        percentile_99, maximum = accumulator.result()
+        self.assertAlmostEqual(
+            percentile_99,
+            float(np.percentile(values.astype(np.float64), 99)),
+            places=7,
+        )
+        self.assertEqual(maximum, float(np.max(values)))
+
+    def test_zero_pi_ratios_are_json_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg, root, _ = self._fixture(Path(temporary))
+            root["pi"][:] = 0.0
+            report = compute_weak_asymmetry(root, cfg)
+            self.assertEqual(report["global"]["ratio_p99"], 0.0)
+            self.assertEqual(report["global"]["ratio_max"], 0.0)
+            json.dumps(report, allow_nan=False)
 
     def test_artifacts_are_json_safe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
